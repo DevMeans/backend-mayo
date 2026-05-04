@@ -7,9 +7,13 @@
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "NodeNext",
-    "target": "esnext",
-    "types": [],
+    "module": "es2022",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "es2023",
+    "types": [
+      "node"
+    ],
     // For nodejs:
     // "lib": ["esnext"],
     // "types": ["node"],
@@ -38,7 +42,7 @@
     "verbatimModuleSyntax": false,
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
+    "moduleResolution": "bundler",
     "skipLibCheck": true,
   }
 }
