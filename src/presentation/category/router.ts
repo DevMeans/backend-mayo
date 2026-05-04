@@ -8,6 +8,7 @@ export class categoryRoute {
         const categoryServiceInstance = new CategoryService()
         const controller = new CategoryController(categoryServiceInstance)
         router.post('/', controller.createCategory)
+        router.get('/', controller.listCategory)
         return router;
     }
 

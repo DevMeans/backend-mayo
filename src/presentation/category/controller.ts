@@ -2,6 +2,7 @@ import { Response } from "express";
 import { CategoryService } from "../services/category.service";
 import { CustomError } from "../../domain/errors/custom.error";
 import { CategoryDto } from "../../domain/dtos/create-category.dto";
+import { ListCategoryDto } from "../../domain/dtos/list-category.dto";
 
 export class CategoryController {
     constructor(
@@ -23,6 +24,18 @@ export class CategoryController {
         if (createCategoryDto) {
             this.categoryService.createCategory(createCategoryDto).then(category => {
                 return res.status(201).json(category);
+            }).catch(error => this.handleError(error, res));
+        }
+    }
+    listCategory = async (req: any, res: Response) => {
+        const { page, limit } = req.query;
+        const [error, listCategoryDto] = ListCategoryDto.create(Number(page), Number(limit));
+        if (error) {
+            return res.status(400).json({ message: error });
+        }
+        if (listCategoryDto) {
+            this.categoryService.listCategory(listCategoryDto).then(categories => {
+                return res.status(200).json(categories);
             }).catch(error => this.handleError(error, res));
         }
     }
