@@ -29,19 +29,19 @@ export class CategoryService {
         }
     }
     async listCategory(listCategoryDto: ListCategoryDto) {
-        const { page=1, limit=10 } = listCategoryDto;
+        const { skip: skip=1, take: take=10 } = listCategoryDto;
         try {
             const categories = await prisma.category.findMany({
-                skip: (page - 1) * limit,
-                take: limit,
+                skip: (skip - 1) * take,
+                take: take,
             });
             const total = await prisma.category.count();
            
             return {
                 data: categories.map(category => CategoryEntity.fromObject(category)),
                 total,
-                page,
-                limit,
+                page: skip,
+                limit: take,
                 //seco:categories duplicado crudo
             }
         } catch (error) {

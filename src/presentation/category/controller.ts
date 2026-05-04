@@ -28,8 +28,8 @@ export class CategoryController {
         }
     }
     listCategory = async (req: any, res: Response) => {
-        const { page, limit } = req.query;
-        const [error, listCategoryDto] = ListCategoryDto.create(Number(page), Number(limit));
+        const { skip, take } = req.query;
+        const [error, listCategoryDto] = ListCategoryDto.create(Number(skip), Number(take));
         if (error) {
             return res.status(400).json({ message: error });
         }

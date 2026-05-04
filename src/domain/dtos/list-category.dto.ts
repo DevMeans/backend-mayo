@@ -1,16 +1,15 @@
 export class ListCategoryDto {
     private constructor(
-        public readonly page: number,
-        public readonly limit: number,
+        public readonly skip: number,
+        public readonly take: number,
     ) { }
-    static create(page: number = 1, limit: number = 10): [string | undefined, ListCategoryDto | undefined] {
-        if (isNaN(page) || page < 1) {
+    static create(skip: number = 1, take: number = 10): [string | undefined, ListCategoryDto | undefined] {
+        if (isNaN(skip) || skip < 1) {
             return ['El número de página debe ser un número entero mayor a 0', undefined];
         }
-        if (isNaN(limit) || limit < 1) {
+        if (isNaN(take) || take < 1) {
             return ['El número de elementos por página debe ser un número entero mayor a 0', undefined];
         }
-        return [undefined, new ListCategoryDto(page, limit)];
-
+        return [undefined, new ListCategoryDto(skip, take)];
     }
 }
