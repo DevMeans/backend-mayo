@@ -9,7 +9,7 @@ export class categoryRoute {
         const controller = new CategoryController(categoryServiceInstance)
         router.post('/', controller.createCategory)
         router.get('/', controller.listCategory)
-        router.get('/findname', controller.findcategoriesbyname)
+        router.get('/search', controller.findcategoriesbyname)
         return router;
     }
 
