@@ -1,4 +1,4 @@
-import { Response } from "express";
+import { Request, Response } from "express";
 import { CategoryService } from "../services/category.service";
 import { CustomError } from "../../domain/errors/custom.error";
 import { CategoryDto } from "../../domain/dtos/create-category.dto";
@@ -36,6 +36,22 @@ export class CategoryController {
         if (listCategoryDto) {
             this.categoryService.listCategory(listCategoryDto).then(categories => {
                 return res.status(200).json(categories);
+            }).catch(error => this.handleError(error, res));
+        }
+    }
+    findcategoriesbyname = async (req: Request, res: Response) => {
+        const { name } = req.query;
+        const [error, findCategoryDto] = CategoryDto.create({ name });
+        if (error) {
+            return res.status(400).json({ message: error });
+        }
+        if (findCategoryDto) {
+            this.categoryService.findcategoriesbyname(findCategoryDto.name).then(categories => {
+                if (categories) {
+                    return res.status(200).json(categories);
+                } else {
+                    return res.status(404).json({ message: 'No se encontraron categorías con ese nombre' });
+                }
             }).catch(error => this.handleError(error, res));
         }
     }

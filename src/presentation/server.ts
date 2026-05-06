@@ -1,5 +1,6 @@
 import express, { Router } from 'express';
 import path from 'path';
+import cors from 'cors';
 interface Options {
     port: number;
     routes: Router;
@@ -23,6 +24,7 @@ export class Server {
     async start() {
 
         this.app.use(express.json());
+        this.app.use(cors());   
         this.app.use(express.urlencoded({ extended: true }));
 
         const publicDir = path.isAbsolute(this.publicPath)

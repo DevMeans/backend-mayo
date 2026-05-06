@@ -29,14 +29,14 @@ export class CategoryService {
         }
     }
     async listCategory(listCategoryDto: ListCategoryDto) {
-        const { skip: skip=1, take: take=10 } = listCategoryDto;
+        const { skip: skip = 1, take: take = 10 } = listCategoryDto;
         try {
             const categories = await prisma.category.findMany({
                 skip: (skip - 1) * take,
                 take: take,
             });
             const total = await prisma.category.count();
-           
+
             return {
                 data: categories.map(category => CategoryEntity.fromObject(category)),
                 total,
@@ -47,5 +47,15 @@ export class CategoryService {
         } catch (error) {
             throw CustomError.internal('Error al listar las categorías');
         }
+    }
+    findcategoriesbyname(name: string): Promise<CategoryEntity[] | null> {
+        return prisma.category.findMany({
+            where: {
+                name: {
+                    contains: name,
+                    mode: 'insensitive',
+                },
+            },
+        }).then(categories => categories.length > 0 ? categories.map(CategoryEntity.fromObject) : null);
     }
 }

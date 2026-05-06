@@ -8,6 +8,7 @@ export class AppRouter{
         const router = Router();
         router.use('/api/auth', AuthRouter.router);
         router.use('/api/categorie', categoryRoute.router);
+       
         return router;
     }
 }
