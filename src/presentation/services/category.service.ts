@@ -48,13 +48,14 @@ export class CategoryService {
             throw CustomError.internal('Error al listar las categorías');
         }
     }
-    findcategoriesbyname(name: string): Promise<CategoryEntity[] | null> {
+    findcategoriesbyname(name: string, isActive?: boolean): Promise<CategoryEntity[] | null> {
         return prisma.category.findMany({
             where: {
                 name: {
                     contains: name,
                     mode: 'insensitive',
                 },
+                ...(isActive !== undefined && { isActive }),
             },
         }).then(categories => categories.length > 0 ? categories.map(CategoryEntity.fromObject) : null);
     }

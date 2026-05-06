@@ -40,19 +40,17 @@ export class CategoryController {
         }
     }
     findcategoriesbyname = async (req: Request, res: Response) => {
-        const { name } = req.query;
-        const [error, findCategoryDto] = CategoryDto.create({ name });
-        if (error) {
-            return res.status(400).json({ message: error });
+        const { name, isActive } = req.query;
+        if (!name || typeof name !== 'string') {
+            return res.status(400).json({ message: 'El nombre es obligatorio y debe ser una cadena' });
         }
-        if (findCategoryDto) {
-            this.categoryService.findcategoriesbyname(findCategoryDto.name).then(categories => {
-                if (categories) {
-                    return res.status(200).json(categories);
-                } else {
-                    return res.status(404).json({ message: 'No se encontraron categorías con ese nombre' });
-                }
-            }).catch(error => this.handleError(error, res));
-        }
+        const isActiveBool = isActive !== undefined ? (isActive === 'true') : undefined;
+        this.categoryService.findcategoriesbyname(name, isActiveBool).then(categories => {
+            if (categories) {
+                return res.status(200).json(categories);
+            } else {
+                return res.status(404).json({ message: 'No se encontraron categorías con ese nombre' });
+            }
+        }).catch(error => this.handleError(error, res));
     }
 }
