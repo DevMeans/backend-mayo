@@ -29,20 +29,23 @@ export class CategoryService {
         }
     }
     async listCategory(listCategoryDto: ListCategoryDto) {
-        const { skip: skip = 1, take: take = 10 } = listCategoryDto;
+        const { skip: skip = 1, take: take = 10, isActive } = listCategoryDto;
         try {
+            const where = {
+                ...(isActive !== undefined && { isActive }),
+            };
             const categories = await prisma.category.findMany({
+                where,
                 skip: (skip - 1) * take,
                 take: take,
             });
-            const total = await prisma.category.count();
+            const total = await prisma.category.count({ where });
 
             return {
                 data: categories.map(category => CategoryEntity.fromObject(category)),
                 total,
                 page: skip,
                 limit: take,
-                //seco:categories duplicado crudo
             }
         } catch (error) {
             throw CustomError.internal('Error al listar las categorías');

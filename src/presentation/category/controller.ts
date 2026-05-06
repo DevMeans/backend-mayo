@@ -28,8 +28,9 @@ export class CategoryController {
         }
     }
     listCategory = async (req: any, res: Response) => {
-        const { skip, take } = req.query;
-        const [error, listCategoryDto] = ListCategoryDto.create(Number(skip), Number(take));
+        const { skip, take, isActive } = req.query;
+        const isActiveBool = isActive !== undefined ? isActive === 'true' : undefined;
+        const [error, listCategoryDto] = ListCategoryDto.create(Number(skip), Number(take), isActiveBool);
         if (error) {
             return res.status(400).json({ message: error });
         }
