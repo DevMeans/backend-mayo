@@ -10,6 +10,7 @@ export class categoryRoute {
         router.post('/', controller.createCategory)
         router.get('/', controller.listCategory)
         router.get('/search', controller.findcategoriesbyname)
+        router.put('/:id', controller.updateCategory)
         return router;
     }
 

@@ -3,6 +3,7 @@ import { CategoryService } from "../services/category.service";
 import { CustomError } from "../../domain/errors/custom.error";
 import { CategoryDto } from "../../domain/dtos/create-category.dto";
 import { ListCategoryDto } from "../../domain/dtos/list-category.dto";
+import { UpdateCategoryDto } from "../../domain/dtos/update-category.dto";
 
 export class CategoryController {
     constructor(
@@ -37,6 +38,19 @@ export class CategoryController {
         if (listCategoryDto) {
             this.categoryService.listCategory(listCategoryDto).then(categories => {
                 return res.status(200).json(categories);
+            }).catch(error => this.handleError(error, res));
+        }
+    }
+    updateCategory = async (req: Request, res: Response) => {
+        const { id } = req.params;
+        const [error, updateCategoryDto] = UpdateCategoryDto.create({ id: Number(id), ...req.body });
+
+        if (error) {
+            return res.status(400).json({ message: error });
+        }
+        if (updateCategoryDto) {
+            this.categoryService.updateCategory(updateCategoryDto).then(category => {
+                return res.status(200).json(category);
             }).catch(error => this.handleError(error, res));
         }
     }

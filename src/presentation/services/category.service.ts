@@ -1,5 +1,5 @@
 import { CategoryDto } from "../../domain/dtos/create-category.dto";
-
+import { UpdateCategoryDto } from "../../domain/dtos/update-category.dto";
 import { prisma } from "../../data/prisma";
 import { CustomError } from '../../domain/errors/custom.error';
 import { CategoryEntity } from "../../domain/entities/category.entity";
@@ -61,5 +61,43 @@ export class CategoryService {
                 ...(isActive !== undefined && { isActive }),
             },
         }).then(categories => categories.length > 0 ? categories.map(CategoryEntity.fromObject) : null);
+    }
+    async updateCategory(updateCategoryDto: UpdateCategoryDto): Promise<CategoryEntity> {
+        const { id, name, isActive } = updateCategoryDto;
+
+        const category = await prisma.category.findUnique({
+            where: { id },
+        });
+
+        if (!category) {
+            throw CustomError.notFound('La categoría no existe');
+        }
+
+        if (name) {
+            const existingCategory = await prisma.category.findFirst({
+                where: {
+                    name: name,
+                    id: { not: id },
+                },
+            });
+
+            if (existingCategory) {
+                throw CustomError.badRequest('Ya existe una categoría con ese nombre');
+            }
+        }
+
+        try {
+            const updatedCategory = await prisma.category.update({
+                where: { id },
+                data: {
+                    ...(name && { name }),
+                    ...(isActive !== undefined && { isActive }),
+                },
+            });
+
+            return CategoryEntity.fromObject(updatedCategory);
+        } catch (error) {
+            throw CustomError.internal('Error al actualizar la categoría');
+        }
     }
 }
