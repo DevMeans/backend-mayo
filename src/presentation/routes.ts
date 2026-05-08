@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AuthRouter } from "./auth/router";
 import { categoryRoute } from "./category/router";
 import { colorRoute } from "./color/router";
+import { sizeRoute } from "./size/router";
 
 export class AppRouter{
 
@@ -10,6 +11,7 @@ export class AppRouter{
         router.use('/api/auth', AuthRouter.router);
         router.use('/api/categorie', categoryRoute.router);
         router.use('/api/color', colorRoute.router);
+        router.use('/api/size', sizeRoute.router);
        
         return router;
     }
