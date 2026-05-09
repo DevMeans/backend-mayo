@@ -1,6 +1,10 @@
 import express, { Router } from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import cors from 'cors';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 interface Options {
     port: number;
     routes: Router;

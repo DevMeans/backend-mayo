@@ -40,34 +40,64 @@ model Size {
 }
 
 model Product {
-  id          Int      @id @default(autoincrement())
+  id          Int     @id @default(autoincrement())
   name        String
   description String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
 
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // CATEGORY
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id])
 
+  // RELATIONS
   variants ProductVariant[]
+  images   ProductImage[]
+}
+
+model ProductImage {
+  id Int @id @default(autoincrement())
+
+  url String
+
+  createdAt DateTime @default(now())
+
+  // RELATION
+  productId Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductVariant {
-  id        Int      @id @default(autoincrement())
-  sku       String   @unique
-  barcode   String?
-  price     Decimal  @db.Decimal(10, 2)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id Int @id @default(autoincrement())
 
+  sku     String  @unique
+  barcode String?
+
+  price Decimal @db.Decimal(10, 2)
+
+  // Imagen específica de variante
+  imageUrl String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // PRODUCT
   productId Int
   product   Product @relation(fields: [productId], references: [id])
 
+  // COLOR
   colorId Int
   color   Color @relation(fields: [colorId], references: [id])
 
+  // SIZE
   sizeId Int
   size   Size @relation(fields: [sizeId], references: [id])
 
+  // Evita variantes duplicadas
   @@unique([productId, colorId, sizeId])
 }
