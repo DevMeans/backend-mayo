@@ -27,9 +27,9 @@ export class Server {
     }
     async start() {
 
-        this.app.use(express.json());
+        this.app.use(express.json({ limit: '15mb' }));
         this.app.use(cors());   
-        this.app.use(express.urlencoded({ extended: true }));
+        this.app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
         const publicDir = path.isAbsolute(this.publicPath)
             ? this.publicPath

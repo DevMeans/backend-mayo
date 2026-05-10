@@ -6,16 +6,18 @@ export class CreateProductDto {
         public readonly colorIds: number[] = [],
         public readonly sizeIds: number[] = [],
         public readonly imageUrls: string[] = [],
+        public readonly imageFiles: Array<{ filename: string; data: string }> = [],
         public readonly variants?: Array<{
             colorId: number;
             sizeId: number;
             price: number;
             imageUrl?: string;
+            imageFile?: { filename: string; data: string };
         }>,
     ) { }
 
     static create(object: { [key: string]: any }): [string | undefined, CreateProductDto | undefined] {
-        const { name, categoryId, description, colorIds = [], sizeIds = [], imageUrls = [], variants } = object;
+        const { name, categoryId, description, colorIds = [], sizeIds = [], imageUrls = [], imageFiles = [], variants } = object;
 
         // Validar nombre
         if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -59,6 +61,14 @@ export class CreateProductDto {
             return ['Todas las imágenes deben ser URLs válidas', undefined];
         }
 
+        if (imageFiles && !Array.isArray(imageFiles)) {
+            return ['imageFiles debe ser un array', undefined];
+        }
+
+        if (imageFiles.some((file: any) => !file || typeof file.filename !== 'string' || typeof file.data !== 'string')) {
+            return ['Cada archivo debe incluir filename y data en base64', undefined];
+        }
+
         // Validar variantes
         if (variants) {
             if (!Array.isArray(variants)) {
@@ -92,6 +102,7 @@ export class CreateProductDto {
             colorIds,
             sizeIds,
             imageUrls,
+            imageFiles,
             variants,
         )];
     }

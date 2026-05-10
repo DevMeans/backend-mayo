@@ -14,6 +14,9 @@ export class productRoute {
         // Generar variantes automáticamente
         router.post('/generate-variants', controller.generateVariants);
 
+        // Eliminar imagen de Cloudinary
+        router.delete('/image/:publicId', controller.deleteImage);
+
         // Listar productos
         router.get('/', controller.listProducts);
 
