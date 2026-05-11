@@ -1,16 +1,13 @@
 import { Router } from "express";
+import { AuthController } from "./controller";
 
 export class AuthRouter {
-    static get router():Router{
+    static get router(): Router {
         const router = Router();
-        router.post('/login', (req, res) => {
-            const { username, password } = req.body;
-            if (username === 'admin' && password === 'password') {
-                res.json({ token: 'fake-jwt-token' });
-            } else {
-                res.status(401).json({ message: 'Invalid credentials' });
-            }   
-        });
+
+        router.post('/login', AuthController.login);
+        router.post('/logout', AuthController.logout);
+
         return router;
     }
 }
