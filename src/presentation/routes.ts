@@ -7,6 +7,8 @@ import { categoryRoute } from "./category/router";
 import { colorRoute } from "./color/router";
 import { sizeRoute } from "./size/router";
 import { productRoute } from "./product/router";
+import { inventoryRoute } from "./inventory/router";
+import { storeRoute } from "./store/router";
 
 export class AppRouter{
 
@@ -21,6 +23,8 @@ export class AppRouter{
         router.use('/api/color', AuthMiddleware.validateJWT, colorRoute.router);
         router.use('/api/size', AuthMiddleware.validateJWT, sizeRoute.router);
         router.use('/api/products', AuthMiddleware.validateJWT, productRoute.router);
+        router.use('/api/inventory', AuthMiddleware.validateJWT, inventoryRoute.router);
+        router.use('/api/stores', AuthMiddleware.validateJWT, storeRoute.router);
 
         return router;
     }

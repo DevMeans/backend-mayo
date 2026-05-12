@@ -186,12 +186,17 @@ model User {
   pickingSessions PickingSession[]
 }
 
+enum StoreType {
+  STORE
+  WAREHOUSE
+}
+
 model Store {
   id Int @id @default(autoincrement())
 
   name String
   code String @unique
-
+  type StoreType @default(STORE)
   address String?
 
   isActive Boolean @default(true)

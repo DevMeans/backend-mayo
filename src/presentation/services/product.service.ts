@@ -1,4 +1,4 @@
-import { CreateProductDto } from "../../domain/dtos/create-product.dto";
+﻿import { CreateProductDto } from "../../domain/dtos/create-product.dto";
 import { UpdateProductDto } from "../../domain/dtos/update-product.dto";
 import { ListProductDto } from "../../domain/dtos/list-product.dto";
 import { GenerateVariantsDto } from "../../domain/dtos/generate-variants.dto";
@@ -14,11 +14,28 @@ export class ProductService {
     constructor() { }
 
     /**
-     * Generar SKU único
-     * Formato: PROD-{PRODUCTID}-{COLORID}-{SIZEID}
+     * Normalizar valores para SKU
      */
-    private generateSKU(productId: number, colorId: number, sizeId: number): string {
-        return `PROD-${productId.toString().padStart(5, '0')}-${colorId.toString().padStart(3, '0')}-${sizeId.toString().padStart(3, '0')}`;
+    private normalizeSkuComponent(value: string): string {
+        return value
+            .trim()
+            .toUpperCase()
+            .normalize('NFD')
+            .replace(/\p{M}/gu, '')
+            .replace(/[^A-Z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+    }
+
+    /**
+     * Generar SKU único
+     * Formato: PROD-{PRODUCTNAME}-{COLORNAME}-{SIZENAME}-{PRODUCTID}-{COLORID}-{SIZEID}
+     */
+    private generateSKU(productName: string, colorName: string, sizeName: string, productId: number, colorId: number, sizeId: number): string {
+        const normalizedName = this.normalizeSkuComponent(productName);
+        const normalizedColor = this.normalizeSkuComponent(colorName);
+        const normalizedSize = this.normalizeSkuComponent(sizeName);
+
+        return `PROD-${normalizedName}-${normalizedColor}-${normalizedSize}-${productId.toString().padStart(5, '0')}-${colorId.toString().padStart(3, '0')}-${sizeId.toString().padStart(3, '0')}`;
     }
 
     /**
@@ -96,7 +113,11 @@ export class ProductService {
             const urlObj = new URL(url);
             const pathParts = urlObj.pathname.split('/').filter(Boolean);
             const filenameWithExt = pathParts[pathParts.length - 1];
-            const filename = filenameWithExt.split('?')[0];
+        if (!filenameWithExt) {
+            return null;
+        }
+
+            const filename = filenameWithExt ? (filenameWithExt.split('?')[0] ?? '') : '';
             const publicId = filename.includes('.') ? filename.substring(0, filename.lastIndexOf('.')) : filename;
             const folder = pathParts[pathParts.length - 2];
 
@@ -219,12 +240,19 @@ export class ProductService {
             }
 
             // Crear las variantes
+            const colorRecords = await prisma.color.findMany({ where: { id: { in: colorIds } } });
+            const sizeRecords = await prisma.size.findMany({ where: { id: { in: sizeIds } } });
+            const colorById = new Map(colorRecords.map(color => [color.id, color.name]));
+            const sizeById = new Map(sizeRecords.map(size => [size.id, size.name]));
+
             const createdVariants = await Promise.all(
                 variants.map(async variant => {
                     const imageUrl = await this.uploadVariantImage(product.id, variant);
+                    const colorName = colorById.get(variant.colorId) ?? '';
+                    const sizeName = sizeById.get(variant.sizeId) ?? '';
                     return prisma.productVariant.create({
                         data: {
-                            sku: this.generateSKU(product.id, variant.colorId, variant.sizeId),
+                            sku: this.generateSKU(product.name, colorName, sizeName, product.id, variant.colorId, variant.sizeId),
                             price: new Prisma.Decimal(String(variant.price)),
                             colorId: variant.colorId,
                             sizeId: variant.sizeId,
@@ -417,7 +445,7 @@ export class ProductService {
     /**
      * Reemplazar las variantes de un producto
      */
-    private async replaceVariants(productId: number, variants: Array<{ colorId: number; sizeId: number; price: number; imageUrl?: string; imageFile?: { filename: string; data: string } }>) {
+    private async replaceVariants(productId: number, productName: string, variants: Array<{ colorId: number; sizeId: number; price: number; imageUrl?: string; imageFile?: { filename: string; data: string } }>) {
         const existingVariants = await prisma.productVariant.findMany({
             where: { productId },
             select: { colorId: true, sizeId: true, imageUrl: true },
@@ -441,14 +469,23 @@ export class ProductService {
 
         await prisma.productVariant.deleteMany({ where: { productId } });
 
+        const colorIds = variants.map((variant) => variant.colorId);
+        const sizeIds = variants.map((variant) => variant.sizeId);
+        const colorRecords = await prisma.color.findMany({ where: { id: { in: colorIds } } });
+        const sizeRecords = await prisma.size.findMany({ where: { id: { in: sizeIds } } });
+        const colorById = new Map(colorRecords.map(color => [color.id, color.name]));
+        const sizeById = new Map(sizeRecords.map(size => [size.id, size.name]));
+
         const now = new Date();
 
         return Promise.all(
             variants.map(async variant => {
                 const imageUrl = await this.uploadVariantImage(productId, variant);
+                const colorName = colorById.get(variant.colorId) ?? '';
+                const sizeName = sizeById.get(variant.sizeId) ?? '';
                 return prisma.productVariant.create({
                     data: {
-                        sku: this.generateSKU(productId, variant.colorId, variant.sizeId),
+                        sku: this.generateSKU(productName, colorName, sizeName, productId, variant.colorId, variant.sizeId),
                         price: new Prisma.Decimal(String(variant.price)),
                         colorId: variant.colorId,
                         sizeId: variant.sizeId,
@@ -493,7 +530,8 @@ export class ProductService {
             }
 
             if (updateData.variants) {
-                await this.replaceVariants(id, updateData.variants);
+                const productName = updateData.name ?? product.name;
+                await this.replaceVariants(id, productName, updateData.variants);
             }
 
             const updated = await prisma.product.update({
