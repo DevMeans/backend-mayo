@@ -338,7 +338,12 @@ export class ProductService {
                 take,
                 include: {
                     category: true,
-                    variants: true,
+                    variants: {
+                        include: {
+                            color: true,
+                            size: true,
+                        },
+                    },
                     images: true,
                 },
                 orderBy: {
@@ -355,7 +360,11 @@ export class ProductService {
                 category: product.category,
                 variantCount: product.variants.length,
                 imageCount: product.images?.length || 0,
-                variants: product.variants.map((v: any) => ProductVariantEntity.fromObject(v)),
+                variants: product.variants.map((v: any) => ({
+                    ...ProductVariantEntity.fromObject(v),
+                    color: v.color,
+                    size: v.size,
+                })),
                 images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
             }));
 

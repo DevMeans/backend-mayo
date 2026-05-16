@@ -9,6 +9,7 @@ import { sizeRoute } from "./size/router";
 import { productRoute } from "./product/router";
 import { inventoryRoute } from "./inventory/router";
 import { storeRoute } from "./store/router";
+import { orderRoute } from "./order/router";
 
 export class AppRouter{
 
@@ -25,6 +26,7 @@ export class AppRouter{
         router.use('/api/products', AuthMiddleware.validateJWT, productRoute.router);
         router.use('/api/inventory', AuthMiddleware.validateJWT, inventoryRoute.router);
         router.use('/api/stores', AuthMiddleware.validateJWT, storeRoute.router);
+        router.use('/api/orders', AuthMiddleware.validateJWT, orderRoute.router);
 
         return router;
     }

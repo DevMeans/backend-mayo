@@ -21,7 +21,13 @@ async function main() {
     // Create admin user
     await prisma.user.upsert({
         where: { email: 'admin@example.com' },
-        update: {},
+        update: {
+            firstName: 'Admin',
+            lastName: 'User',
+            password: hashedPassword,
+            roleId: adminRole.id,
+            isActive: true
+        },
         create: {
             firstName: 'Admin',
             lastName: 'User',
@@ -34,7 +40,13 @@ async function main() {
     // Create regular user
     await prisma.user.upsert({
         where: { email: 'user@example.com' },
-        update: {},
+        update: {
+            firstName: 'Regular',
+            lastName: 'User',
+            password: hashedPassword,
+            roleId: userRole.id,
+            isActive: true
+        },
         create: {
             firstName: 'Regular',
             lastName: 'User',
