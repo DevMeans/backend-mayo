@@ -9,6 +9,41 @@ import { UpdateOrderPickingDto } from "../../domain/dtos/update-order-picking.dt
 export class OrderService {
     constructor() {}
 
+    private detectSalesChannel(note?: string | null): 'POS' | 'ECOMMERCE' | 'INTERNAL' {
+        const text = (note || '').toUpperCase();
+        if (text.includes('POS-') || text.includes('METODO DE PAGO')) {
+            return 'POS';
+        }
+        if (text.includes('ECOMMERCE')) {
+            return 'ECOMMERCE';
+        }
+        return 'INTERNAL';
+    }
+
+    private mapOrderWithPresentationData(order: any) {
+        const responsible = order.sellerUser || order.pickerUser || order.dispenserUser || null;
+        const responsibleRole = order.sellerUser
+            ? 'SELLER'
+            : order.pickerUser
+                ? 'PICKER'
+                : order.dispenserUser
+                    ? 'DISPENSER'
+                    : null;
+
+        return {
+            ...order,
+            salesChannel: this.detectSalesChannel(order.note),
+            primaryResponsible: responsible
+                ? {
+                    id: responsible.id,
+                    firstName: responsible.firstName,
+                    lastName: responsible.lastName,
+                    role: responsibleRole,
+                }
+                : null,
+        };
+    }
+
     /**
      * Generar código único para el pedido
      * Formato: ORD-{YYYYMMDD}-{RANDOM}
@@ -197,9 +232,40 @@ export class OrderService {
                 sellerUser: true,
                 pickerUser: true,
                 dispenserUser: true,
-                pickingSession: { include: { items: { include: { variant: true } } } },
+                pickingSession: {
+                    include: {
+                        assignedUser: true,
+                        items: {
+                            include: {
+                                variant: {
+                                    include: {
+                                        product: true,
+                                        color: true,
+                                        size: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
                 transfer: true,
-                reservations: true,
+                reservations: {
+                    include: {
+                        reservedBy: true,
+                        inventory: {
+                            include: {
+                                store: true,
+                                variant: {
+                                    include: {
+                                        product: true,
+                                        color: true,
+                                        size: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
             },
         });
 
@@ -207,7 +273,7 @@ export class OrderService {
             throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
         }
 
-        return order;
+        return this.mapOrderWithPresentationData(order);
     }
 
     /**
@@ -250,6 +316,44 @@ export class OrderService {
             andFilters.push({ createdAt });
         }
 
+        if (dto.search) {
+            andFilters.push({
+                OR: [
+                    { code: { contains: dto.search, mode: 'insensitive' } },
+                    { clientName: { contains: dto.search, mode: 'insensitive' } },
+                    { clientEmail: { contains: dto.search, mode: 'insensitive' } },
+                    { clientPhone: { contains: dto.search, mode: 'insensitive' } },
+                ],
+            });
+        }
+
+        if (dto.channel === 'POS') {
+            andFilters.push({
+                OR: [
+                    { note: { contains: 'POS-', mode: 'insensitive' } },
+                    { note: { contains: 'METODO DE PAGO', mode: 'insensitive' } },
+                ],
+            });
+        }
+
+        if (dto.channel === 'ECOMMERCE') {
+            andFilters.push({
+                note: { contains: 'ECOMMERCE', mode: 'insensitive' },
+            });
+        }
+
+        if (dto.channel === 'INTERNAL') {
+            andFilters.push({
+                NOT: {
+                    OR: [
+                        { note: { contains: 'POS-', mode: 'insensitive' } },
+                        { note: { contains: 'METODO DE PAGO', mode: 'insensitive' } },
+                        { note: { contains: 'ECOMMERCE', mode: 'insensitive' } },
+                    ],
+                },
+            });
+        }
+
         const where = andFilters.length > 0 ? { AND: andFilters } : {};
 
         const skip = (dto.page - 1) * dto.limit;
@@ -273,10 +377,11 @@ export class OrderService {
             take: dto.limit,
         });
 
+        const mappedOrders = orders.map((order) => this.mapOrderWithPresentationData(order));
         const total = await prisma.order.count({ where });
 
         return {
-            data: orders,
+            data: mappedOrders,
             pagination: {
                 page: dto.page,
                 limit: dto.limit,

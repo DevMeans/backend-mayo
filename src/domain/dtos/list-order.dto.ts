@@ -1,5 +1,7 @@
 import { OrderStatusEnum } from './update-order-status.dto';
 
+export type OrderChannelFilter = 'POS' | 'ECOMMERCE' | 'INTERNAL';
+
 export class ListOrderDto {
     private constructor(
         public readonly page: number = 1,
@@ -9,6 +11,8 @@ export class ListOrderDto {
         public readonly responsibleUserId?: number,
         public readonly startDate?: Date,
         public readonly endDate?: Date,
+        public readonly search?: string,
+        public readonly channel?: OrderChannelFilter,
     ) {}
 
     static create(object: { [key: string]: any }): [string | undefined, ListOrderDto | undefined] {
@@ -20,6 +24,8 @@ export class ListOrderDto {
             responsibleUserId,
             startDate,
             endDate,
+            search,
+            channel,
         } = object;
 
         const pageNumber = Number(page);
@@ -51,6 +57,20 @@ export class ListOrderDto {
 
         if (hasResponsibleUserId && (!Number.isInteger(responsibleUserIdNumber) || (responsibleUserIdNumber as number) < 1)) {
             return ['El usuario responsable debe ser un numero valido', undefined];
+        }
+
+        const searchText = typeof search === 'string' ? search.trim() : '';
+        if (search !== undefined && search !== null && typeof search !== 'string') {
+            return ['El parametro de busqueda no es valido', undefined];
+        }
+
+        let channelValue: OrderChannelFilter | undefined;
+        if (channel !== undefined && channel !== null && String(channel).trim() !== '') {
+            const normalizedChannel = String(channel).trim().toUpperCase();
+            if (!['POS', 'ECOMMERCE', 'INTERNAL'].includes(normalizedChannel)) {
+                return ['El canal debe ser POS, ECOMMERCE o INTERNAL', undefined];
+            }
+            channelValue = normalizedChannel as OrderChannelFilter;
         }
 
         let startDateObj: Date | undefined;
@@ -90,6 +110,8 @@ export class ListOrderDto {
                 responsibleUserIdNumber,
                 startDateObj,
                 endDateObj,
+                searchText || undefined,
+                channelValue,
             ),
         ];
     }

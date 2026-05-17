@@ -7,7 +7,8 @@
     "dev": "tsx watch src/app.ts",
     "build": "rimraf ./dist && tsc",
     "start": "npm run build && node dist/app.js",
-    "seed": "tsx src/data/seed.ts"
+    "seed": "tsx src/data/seed.ts",
+    "db:clean:keep-users": "tsx src/data/clean-db-keep-users.ts"
   },
   "keywords": [],
   "author": "",

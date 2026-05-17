@@ -63,11 +63,18 @@ export class InventoryService {
             orderBy: { id: 'asc' },
         };
 
-        if (typeof options.skip === 'number') {
-            findManyArgs.skip = options.skip;
-        }
-        if (typeof options.take === 'number') {
-            findManyArgs.take = options.take;
+        const page = typeof options.skip === 'number' && Number.isFinite(options.skip) && options.skip > 0
+            ? Math.floor(options.skip)
+            : undefined;
+        const take = typeof options.take === 'number' && Number.isFinite(options.take) && options.take > 0
+            ? Math.floor(options.take)
+            : undefined;
+
+        if (typeof take === 'number') {
+            findManyArgs.take = take;
+            findManyArgs.skip = typeof page === 'number' ? (page - 1) * take : 0;
+        } else if (typeof page === 'number') {
+            findManyArgs.skip = Math.max(0, page - 1);
         }
 
         const inventories = await prisma.inventory.findMany(findManyArgs);
