@@ -20,8 +20,23 @@ export class orderRoute {
         // Obtener stock remoto para una variante
         router.get('/remote-stock/:variantId', controller.getRemoteStock);
 
+        // Reservas de una orden
+        router.get('/:id/reservations', controller.getOrderReservations);
+
+        // Obtener picking de una orden
+        router.get('/:id/picking', controller.getOrderPicking);
+
+        // Iniciar picking
+        router.post('/:id/picking/start', controller.startOrderPicking);
+
+        // Finalizar picking
+        router.patch('/:id/picking/complete', controller.completeOrderPicking);
+
         // Actualizar picking del pedido
         router.patch('/:id/picking', controller.updateOrderPicking);
+
+        // Actualizar item de picking
+        router.patch('/picking/items/:itemId', controller.updatePickingItem);
 
         // Obtener pedido por ID
         router.get('/:id', controller.getOrderById);

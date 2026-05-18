@@ -9,6 +9,8 @@ export enum OrderStatusEnum {
     WAITING_STOCK = 'WAITING_STOCK',
 }
 
+export const ORDER_STATUS_VALUES = Object.values(OrderStatusEnum) as OrderStatusEnum[];
+
 export class UpdateOrderStatusDto {
     private constructor(
         public readonly status: OrderStatusEnum,
@@ -17,20 +19,27 @@ export class UpdateOrderStatusDto {
 
     static create(object: { [key: string]: any }): [string | undefined, UpdateOrderStatusDto | undefined] {
         const { status, note } = object;
+        const normalizedStatus = typeof status === 'string' ? status.trim().toUpperCase() : '';
 
-        // Validar estado
-        if (!status || typeof status !== 'string') {
-            return ['El estado es obligatorio y debe ser una cadena válida', undefined];
+        if (!normalizedStatus) {
+            return ['El estado es obligatorio y debe ser una cadena valida', undefined];
         }
 
-        const validStatuses = Object.values(OrderStatusEnum) as string[];
-        if (!validStatuses.includes(status)) {
+        if (!ORDER_STATUS_VALUES.includes(normalizedStatus as OrderStatusEnum)) {
             return [
-                `El estado debe ser uno de: ${validStatuses.join(', ')}`,
+                `El estado debe ser uno de: ${ORDER_STATUS_VALUES.join(', ')}`,
                 undefined,
             ];
         }
 
-        return [undefined, new UpdateOrderStatusDto(status as OrderStatusEnum, note)];
+        const normalizedNote = typeof note === 'string' ? note.trim() : undefined;
+
+        return [
+            undefined,
+            new UpdateOrderStatusDto(
+                normalizedStatus as OrderStatusEnum,
+                normalizedNote?.length ? normalizedNote : undefined,
+            ),
+        ];
     }
 }

@@ -9,6 +9,17 @@ import { UpdateOrderPickingDto } from "../../domain/dtos/update-order-picking.dt
 export class OrderService {
     constructor() {}
 
+    private resolvePreferredResponsibleUserId(...candidates: Array<number | null | undefined>): number | null {
+        for (const candidate of candidates) {
+            const parsed = Number(candidate);
+            if (Number.isInteger(parsed) && parsed > 0) {
+                return parsed;
+            }
+        }
+
+        return null;
+    }
+
     private detectSalesChannel(note?: string | null): 'POS' | 'ECOMMERCE' | 'INTERNAL' {
         const text = (note || '').toUpperCase();
         if (text.includes('POS-') || text.includes('METODO DE PAGO')) {
@@ -18,6 +29,56 @@ export class OrderService {
             return 'ECOMMERCE';
         }
         return 'INTERNAL';
+    }
+
+    private resolvePickedQuantity(orderItem: any, order?: any): number {
+        const pickedFromOrderItem = Number(orderItem?.picked || 0);
+        if (pickedFromOrderItem > 0) {
+            return pickedFromOrderItem;
+        }
+
+        const sessionItems = order?.pickingSession?.items || [];
+        const pickedFromSession = sessionItems.find(
+            (sessionItem: any) => Number(sessionItem.variantId) === Number(orderItem?.variantId),
+        );
+        return Number(pickedFromSession?.pickedQuantity || 0);
+    }
+
+    private mapPickingItemStatus(pickedQuantity: number, requestedQuantity: number): 'PENDING' | 'PARTIAL' | 'COMPLETED' {
+        if (pickedQuantity <= 0) return 'PENDING';
+        if (pickedQuantity >= requestedQuantity) return 'COMPLETED';
+        return 'PARTIAL';
+    }
+
+    private mapOrderWithPickingSummary(order: any) {
+        const items = Array.isArray(order?.items) ? order.items : [];
+        const totalRequested = items.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
+        const totalPicked = items.reduce((sum: number, item: any) => {
+            const pickedQuantity = this.resolvePickedQuantity(item, order);
+            return sum + Math.min(Number(item.quantity || 0), pickedQuantity);
+        }, 0);
+
+        const progress = totalRequested > 0 ? Math.round((totalPicked / totalRequested) * 100) : 0;
+
+        return {
+            ...order,
+            items: items.map((item: any) => {
+                const requestedQuantity = Number(item.quantity || 0);
+                const pickedQuantity = this.resolvePickedQuantity(item, order);
+                const pendingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
+                return {
+                    ...item,
+                    pickedQuantity,
+                    pendingQuantity,
+                    pickingStatus: this.mapPickingItemStatus(pickedQuantity, requestedQuantity),
+                };
+            }),
+            pickingSummary: {
+                totalRequested,
+                totalPicked,
+                progress,
+            },
+        };
     }
 
     private mapOrderWithPresentationData(order: any) {
@@ -30,7 +91,7 @@ export class OrderService {
                     ? 'DISPENSER'
                     : null;
 
-        return {
+        const baseMappedOrder = {
             ...order,
             salesChannel: this.detectSalesChannel(order.note),
             primaryResponsible: responsible
@@ -42,10 +103,107 @@ export class OrderService {
                 }
                 : null,
         };
+
+        return this.mapOrderWithPickingSummary(baseMappedOrder);
+    }
+
+    private readonly orderDetailInclude = {
+        items: {
+            include: { variant: { include: { product: true, color: true, size: true } } },
+        },
+        sourceStore: true,
+        fulfillmentStore: true,
+        sellerUser: true,
+        pickerUser: true,
+        dispenserUser: true,
+        pickingSession: {
+            include: {
+                assignedUser: true,
+                items: {
+                    include: {
+                        variant: {
+                            include: {
+                                product: true,
+                                color: true,
+                                size: true,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        transfer: true,
+        reservations: {
+            include: {
+                reservedBy: true,
+                inventory: {
+                    include: {
+                        store: true,
+                        variant: {
+                            include: {
+                                product: true,
+                                color: true,
+                                size: true,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    private async assertOrderExists(orderId: number) {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            select: { id: true },
+        });
+
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+    }
+
+    private mapOrderItemStatusFromPicked(pickedQuantity: number, requestedQuantity: number): 'PENDING' | 'PARTIAL' | 'PICKED' {
+        if (pickedQuantity <= 0) return 'PENDING';
+        if (pickedQuantity >= requestedQuantity) return 'PICKED';
+        return 'PARTIAL';
+    }
+
+    private async syncPickingAndOrderStatus(orderId: number) {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                items: true,
+                pickingSession: true,
+            },
+        });
+
+        if (!order || !order.pickingSession) {
+            return;
+        }
+
+        const nextPickingStatus = 'IN_PROGRESS';
+
+        await prisma.pickingSession.update({
+            where: { id: order.pickingSession.id },
+            data: { status: nextPickingStatus },
+        });
+
+        if (order.status === OrderStatusEnum.CANCELLED || order.status === OrderStatusEnum.DELIVERED) {
+            return;
+        }
+
+        const nextOrderStatus = OrderStatusEnum.PREPARING;
+        if (nextOrderStatus !== order.status) {
+            await prisma.order.update({
+                where: { id: orderId },
+                data: { status: nextOrderStatus },
+            });
+        }
     }
 
     /**
-     * Generar código único para el pedido
+     * Generar cÃ³digo Ãºnico para el pedido
      * Formato: ORD-{YYYYMMDD}-{RANDOM}
      */
     private generateOrderCode(): string {
@@ -95,7 +253,7 @@ export class OrderService {
         });
 
         if (variants.length !== variantIds.length) {
-            throw CustomError.badRequest('Una o más variantes seleccionadas no existen');
+            throw CustomError.badRequest('Una o mÃ¡s variantes seleccionadas no existen');
         }
 
         // Validar stock disponible para cada variante
@@ -145,6 +303,8 @@ export class OrderService {
                     create: dto.items.map((item) => ({
                         variantId: item.variantId,
                         quantity: item.quantity,
+                        reserved: item.quantity,
+                        picked: 0,
                         unitPrice: item.unitPrice,
                         subtotal: item.quantity * item.unitPrice,
                     })),
@@ -160,7 +320,7 @@ export class OrderService {
             },
         });
 
-        // Crear reservas automáticamente para cada item
+        // Crear reservas automÃ¡ticamente para cada item
         for (const item of order.items) {
             await prisma.reservation.create({
                 data: {
@@ -223,50 +383,7 @@ export class OrderService {
     async getOrderById(orderId: number) {
         const order = await prisma.order.findUnique({
             where: { id: orderId },
-            include: {
-                items: {
-                    include: { variant: { include: { product: true, color: true, size: true } } },
-                },
-                sourceStore: true,
-                fulfillmentStore: true,
-                sellerUser: true,
-                pickerUser: true,
-                dispenserUser: true,
-                pickingSession: {
-                    include: {
-                        assignedUser: true,
-                        items: {
-                            include: {
-                                variant: {
-                                    include: {
-                                        product: true,
-                                        color: true,
-                                        size: true,
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-                transfer: true,
-                reservations: {
-                    include: {
-                        reservedBy: true,
-                        inventory: {
-                            include: {
-                                store: true,
-                                variant: {
-                                    include: {
-                                        product: true,
-                                        color: true,
-                                        size: true,
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
+            include: this.orderDetailInclude,
         });
 
         if (!order) {
@@ -371,6 +488,12 @@ export class OrderService {
                 sellerUser: true,
                 pickerUser: true,
                 dispenserUser: true,
+                pickingSession: {
+                    include: {
+                        assignedUser: true,
+                        items: true,
+                    },
+                },
             },
             orderBy: { createdAt: 'desc' },
             skip,
@@ -394,10 +517,20 @@ export class OrderService {
     /**
      * Actualizar estado del pedido
      */
-    async updateOrderStatus(orderId: number, dto: UpdateOrderStatusDto) {
-        const order = await this.getOrderById(orderId);
+    async updateOrderStatus(orderId: number, dto: UpdateOrderStatusDto, responsibleUserId?: number) {
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                items: true,
+                reservations: { include: { inventory: true } },
+            },
+        });
 
-        // Validar transición de estados
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+
+        // Validar transicion de estados
         const validTransitions: Record<OrderStatusEnum, OrderStatusEnum[]> = {
             [OrderStatusEnum.PENDING]: [OrderStatusEnum.CONFIRMED, OrderStatusEnum.WAITING_STOCK, OrderStatusEnum.CANCELLED],
             [OrderStatusEnum.CONFIRMED]: [OrderStatusEnum.PREPARING, OrderStatusEnum.WAITING_TRANSFER, OrderStatusEnum.CANCELLED],
@@ -410,81 +543,111 @@ export class OrderService {
         };
 
         if (!validTransitions[order.status as OrderStatusEnum].includes(dto.status as OrderStatusEnum)) {
-            throw CustomError.badRequest(
-                `No se puede cambiar de ${order.status} a ${dto.status}`
-            );
+            throw CustomError.badRequest(`No se puede cambiar de ${order.status} a ${dto.status}`);
         }
 
-        // Si se cancela, liberar reservas
-        if (dto.status === OrderStatusEnum.CANCELLED) {
-            const reservations = await prisma.reservation.findMany({
-                where: { orderId },
-                include: { inventory: true },
-            });
+        await prisma.$transaction(async (tx) => {
+            if (dto.status === OrderStatusEnum.CANCELLED) {
+                const activeReservations = order.reservations.filter((reservation) => reservation.status === 'ACTIVE');
 
-            for (const reservation of reservations) {
-                // Liberar stock reservado
-                await prisma.inventory.update({
-                    where: { id: reservation.inventoryId },
-                    data: { reservedStock: { decrement: reservation.quantity } },
-                });
+                for (const reservation of activeReservations) {
+                    const previousStock = Number(reservation.inventory.stock || 0);
 
-                // Marcar reserva como liberada
-                await prisma.reservation.update({
-                    where: { id: reservation.id },
-                    data: { status: 'RELEASED' },
-                });
-            }
-        }
+                    await tx.inventory.update({
+                        where: { id: reservation.inventoryId },
+                        data: { reservedStock: { decrement: reservation.quantity } },
+                    });
 
-        // Si se entrega, consumir reservas
-        if (dto.status === OrderStatusEnum.DELIVERED) {
-            const reservations = await prisma.reservation.findMany({
-                where: { orderId },
-                include: { inventory: true },
-            });
+                    await tx.reservation.update({
+                        where: { id: reservation.id },
+                        data: { status: 'RELEASED' },
+                    });
 
-            for (const reservation of reservations) {
-                // Disminuir stock
-                await prisma.inventory.update({
-                    where: { id: reservation.inventoryId },
-                    data: {
-                        stock: { decrement: reservation.quantity },
-                        reservedStock: { decrement: reservation.quantity },
+                    await tx.inventoryMovement.create({
+                        data: {
+                            type: 'UNRESERVED',
+                            quantity: reservation.quantity,
+                            previousStock,
+                            newStock: previousStock,
+                            note: `Reserva liberada por cancelacion de orden ${order.code}`,
+                            responsibleUserId: responsibleUserId ?? null,
+                            inventoryId: reservation.inventoryId,
+                            reservationId: reservation.id,
+                        },
+                    });
+                }
+
+                await tx.pickingSession.updateMany({
+                    where: {
+                        orderId,
+                        status: { in: ['PENDING', 'IN_PROGRESS'] },
                     },
-                });
-
-                // Marcar reserva como completada
-                await prisma.reservation.update({
-                    where: { id: reservation.id },
-                    data: { status: 'COMPLETED' },
+                    data: { status: 'CANCELLED' },
                 });
             }
-        }
 
-        const updatedOrder = await prisma.order.update({
-            where: { id: orderId },
-            data: {
-                status: dto.status,
-                updatedAt: new Date(),
-            },
-            include: {
-                items: {
-                    include: { variant: { include: { product: true } } },
+            if (dto.status === OrderStatusEnum.DELIVERED) {
+                const activeReservations = order.reservations.filter((reservation) => reservation.status === 'ACTIVE');
+
+                for (const reservation of activeReservations) {
+                    const previousStock = Number(reservation.inventory.stock || 0);
+                    const newStock = previousStock - reservation.quantity;
+
+                    await tx.inventory.update({
+                        where: { id: reservation.inventoryId },
+                        data: {
+                            stock: { decrement: reservation.quantity },
+                            reservedStock: { decrement: reservation.quantity },
+                        },
+                    });
+
+                    await tx.reservation.update({
+                        where: { id: reservation.id },
+                        data: { status: 'COMPLETED' },
+                    });
+
+                    await tx.inventoryMovement.create({
+                        data: {
+                            type: 'OUT',
+                            quantity: reservation.quantity,
+                            previousStock,
+                            newStock,
+                            note: `Stock consumido por entrega de orden ${order.code}`,
+                            responsibleUserId: responsibleUserId ?? null,
+                            inventoryId: reservation.inventoryId,
+                            reservationId: reservation.id,
+                        },
+                    });
+                }
+
+                await tx.orderItem.updateMany({
+                    where: { orderId },
+                    data: { status: 'PICKED' },
+                });
+            }
+
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    status: dto.status,
+                    updatedAt: new Date(),
                 },
-                sourceStore: true,
-                fulfillmentStore: true,
-            },
+            });
         });
 
-        return updatedOrder;
+        const updatedOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: this.orderDetailInclude,
+        });
+
+        return this.mapOrderWithPresentationData(updatedOrder);
     }
 
     /**
      * Asignar responsable a un pedido
      */
     async assignResponsible(orderId: number, dto: AssignOrderResponsibleDto) {
-        const order = await this.getOrderById(orderId);
+        await this.getOrderById(orderId);
 
         // Validar que el usuario existe
         const user = await prisma.user.findUnique({
@@ -505,17 +668,24 @@ export class OrderService {
             updateData.dispenserUserId = dto.userId;
         }
 
-        const updatedOrder = await prisma.order.update({
-            where: { id: orderId },
-            data: updateData,
-            include: {
-                sellerUser: true,
-                pickerUser: true,
-                dispenserUser: true,
-            },
+        const updatedOrder = await prisma.$transaction(async (tx) => {
+            const order = await tx.order.update({
+                where: { id: orderId },
+                data: updateData,
+                include: this.orderDetailInclude,
+            });
+
+            if (dto.roleType === 'picker') {
+                await tx.pickingSession.updateMany({
+                    where: { orderId },
+                    data: { assignedUserId: dto.userId },
+                });
+            }
+
+            return order;
         });
 
-        return updatedOrder;
+        return this.mapOrderWithPresentationData(updatedOrder);
     }
 
     /**
@@ -566,33 +736,114 @@ export class OrderService {
             .sort((a, b) => b.availableStock - a.availableStock);
     }
 
-    async updateOrderPicking(orderId: number, dto: UpdateOrderPickingDto) {
+    async getOrderReservations(orderId: number) {
+        await this.assertOrderExists(orderId);
+
+        const reservations = await prisma.reservation.findMany({
+            where: { orderId },
+            include: {
+                reservedBy: true,
+                inventory: {
+                    include: {
+                        store: true,
+                        variant: {
+                            include: {
+                                product: true,
+                                color: true,
+                                size: true,
+                            },
+                        },
+                    },
+                },
+            },
+            orderBy: { createdAt: 'asc' },
+        });
+
+        return reservations;
+    }
+
+    async getOrderPicking(orderId: number) {
         const order = await this.getOrderById(orderId);
+        const pickingSession = order?.pickingSession || null;
+        const sessionItems = pickingSession?.items || [];
 
-        const validPickingStatuses = [
-            OrderStatusEnum.CONFIRMED,
-            OrderStatusEnum.PREPARING,
-            OrderStatusEnum.WAITING_TRANSFER,
-        ];
+        const items = (order?.items || []).map((item: any) => {
+            const sessionItem = sessionItems.find((candidate: any) => Number(candidate.variantId) === Number(item.variantId));
+            const pickedQuantity = Number(sessionItem?.pickedQuantity ?? item?.picked ?? 0);
+            const requestedQuantity = Number(item?.quantity || 0);
+            const missingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
+            const itemStatus = this.mapPickingItemStatus(pickedQuantity, requestedQuantity);
 
-        if (!validPickingStatuses.includes(order.status as OrderStatusEnum)) {
-            throw CustomError.badRequest('El pedido debe estar CONFIRMED, PREPARING o WAITING_TRANSFER para actualizar el picking');
+            return {
+                pickingItemId: sessionItem?.id ?? null,
+                orderItemId: item.id,
+                variantId: item.variantId,
+                requestedQuantity,
+                pickedQuantity,
+                missingQuantity,
+                status: itemStatus,
+                variant: item.variant,
+                responsibleUser: pickingSession?.assignedUser || null,
+                updatedAt: sessionItem?.createdAt || pickingSession?.updatedAt || order.updatedAt,
+            };
+        });
+
+        const totalRequested = items.reduce((sum: number, item: any) => sum + item.requestedQuantity, 0);
+        const totalPicked = items.reduce((sum: number, item: any) => sum + item.pickedQuantity, 0);
+        const progress = totalRequested > 0 ? Math.round((totalPicked / totalRequested) * 100) : 0;
+
+        return {
+            orderId: order.id,
+            orderCode: order.code,
+            orderStatus: order.status,
+            pickingSession: pickingSession
+                ? {
+                    id: pickingSession.id,
+                    status: pickingSession.status,
+                    assignedUser: pickingSession.assignedUser || null,
+                    createdAt: pickingSession.createdAt,
+                    updatedAt: pickingSession.updatedAt,
+                }
+                : null,
+            summary: {
+                totalRequested,
+                totalPicked,
+                progress,
+                completed: items.every((item: any) => item.status === 'COMPLETED'),
+            },
+            items,
+        };
+    }
+
+    async startOrderPicking(orderId: number, responsibleUserId?: number) {
+        const order = await this.getOrderById(orderId);
+        const validStatuses = [OrderStatusEnum.CONFIRMED, OrderStatusEnum.PREPARING, OrderStatusEnum.WAITING_TRANSFER];
+
+        if (!validStatuses.includes(order.status as OrderStatusEnum)) {
+            throw CustomError.badRequest('Solo pedidos CONFIRMED, PREPARING o WAITING_TRANSFER pueden iniciar picking');
         }
+
+        const activeReservations = (order.reservations || []).filter((reservation: any) => reservation.status === 'ACTIVE');
+        if (activeReservations.length === 0) {
+            throw CustomError.badRequest('La orden no tiene reservas activas para iniciar picking');
+        }
+
+        const assignedUserId = this.resolvePreferredResponsibleUserId(order.pickerUserId, responsibleUserId);
 
         const session = await prisma.pickingSession.upsert({
             where: { orderId: order.id },
-            create: { orderId: order.id, status: 'IN_PROGRESS' },
-            update: { status: 'IN_PROGRESS' },
+            create: {
+                orderId: order.id,
+                status: 'IN_PROGRESS',
+                assignedUserId,
+            },
+            update: {
+                status: 'IN_PROGRESS',
+                assignedUserId,
+            },
         });
 
-        const orderItems = order.items;
-
-        for (const item of dto.items) {
-            const orderItem = orderItems.find((oi: any) => oi.variantId === item.variantId);
-            if (!orderItem) {
-                throw CustomError.badRequest(`La variante ${item.variantId} no pertenece al pedido`);
-            }
-
+        for (const item of order.items) {
             const existingPickingItem = await prisma.pickingItem.findFirst({
                 where: {
                     sessionId: session.id,
@@ -603,52 +854,192 @@ export class OrderService {
             if (existingPickingItem) {
                 await prisma.pickingItem.update({
                     where: { id: existingPickingItem.id },
-                    data: {
-                        pickedQuantity: item.pickedQuantity,
-                        quantity: orderItem.quantity,
-                    },
+                    data: { quantity: item.quantity },
                 });
-            } else {
-                await prisma.pickingItem.create({
-                    data: {
-                        sessionId: session.id,
-                        variantId: item.variantId,
-                        quantity: orderItem.quantity,
-                        pickedQuantity: item.pickedQuantity,
-                    },
-                });
+                continue;
             }
+
+            await prisma.pickingItem.create({
+                data: {
+                    sessionId: session.id,
+                    variantId: item.variantId,
+                    quantity: item.quantity,
+                    pickedQuantity: Number(item.picked || 0),
+                },
+            });
         }
 
-        const allPicked = dto.items.every((item) => {
-            const orderItem = orderItems.find((oi: any) => oi.variantId === item.variantId);
-            return orderItem && item.pickedQuantity >= orderItem.quantity;
-        });
-
-        const pickingStatus = allPicked ? 'COMPLETED' : 'IN_PROGRESS';
-        await prisma.pickingSession.update({
-            where: { id: session.id },
-            data: { status: pickingStatus },
-        });
-
-        const orderStatus = allPicked ? OrderStatusEnum.READY : OrderStatusEnum.PREPARING;
-        const updatedOrder = await prisma.order.update({
+        await prisma.order.update({
             where: { id: orderId },
-            data: { status: orderStatus },
-            include: {
-                items: {
-                    include: { variant: { include: { product: true, color: true, size: true } } },
-                },
-                sourceStore: true,
-                fulfillmentStore: true,
-                sellerUser: true,
-                pickerUser: true,
-                dispenserUser: true,
-                pickingSession: { include: { items: { include: { variant: true } } } },
+            data: {
+                status: OrderStatusEnum.PREPARING,
+                pickerUserId: assignedUserId,
             },
         });
 
-        return updatedOrder;
+        return this.getOrderPicking(orderId);
+    }
+
+    async updatePickingItem(pickingItemId: number, pickedQuantity: number, responsibleUserId?: number) {
+        if (!Number.isInteger(pickingItemId) || pickingItemId < 1) {
+            throw CustomError.badRequest('El ID del item de picking es invalido');
+        }
+
+        if (!Number.isFinite(pickedQuantity) || pickedQuantity < 0) {
+            throw CustomError.badRequest('La cantidad separada debe ser mayor o igual a 0');
+        }
+
+        const pickingItem = await prisma.pickingItem.findUnique({
+            where: { id: pickingItemId },
+            include: {
+                session: {
+                    include: {
+                        order: {
+                            include: {
+                                items: true,
+                                reservations: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        if (!pickingItem || !pickingItem.session?.order) {
+            throw CustomError.notFound(`No se encontro el item de picking ${pickingItemId}`);
+        }
+
+        const order = pickingItem.session.order;
+        const validStatuses = [
+            OrderStatusEnum.CONFIRMED,
+            OrderStatusEnum.PREPARING,
+            OrderStatusEnum.WAITING_TRANSFER,
+            OrderStatusEnum.READY,
+        ];
+        if (!validStatuses.includes(order.status as OrderStatusEnum)) {
+            throw CustomError.badRequest('La orden no permite actualizar picking en su estado actual');
+        }
+
+        const orderItem = order.items.find((item: any) => Number(item.variantId) === Number(pickingItem.variantId));
+        if (!orderItem) {
+            throw CustomError.badRequest('La variante del item de picking no pertenece a la orden');
+        }
+
+        const reservedByVariant = order.reservations
+            .filter((reservation: any) =>
+                Number(reservation.variantId) === Number(pickingItem.variantId) &&
+                (reservation.status === 'ACTIVE' || reservation.status === 'COMPLETED'))
+            .reduce((sum: number, reservation: any) => sum + Number(reservation.quantity || 0), 0);
+
+        const maxAllowed = Math.min(Number(orderItem.quantity || 0), reservedByVariant > 0 ? reservedByVariant : Number(orderItem.quantity || 0));
+        if (pickedQuantity > maxAllowed) {
+            throw CustomError.badRequest(`La cantidad separada no puede superar ${maxAllowed}`);
+        }
+
+        await prisma.pickingItem.update({
+            where: { id: pickingItemId },
+            data: { pickedQuantity },
+        });
+
+        await prisma.orderItem.update({
+            where: { id: orderItem.id },
+            data: {
+                picked: pickedQuantity,
+                status: this.mapOrderItemStatusFromPicked(pickedQuantity, Number(orderItem.quantity || 0)),
+            },
+        });
+
+        const nextPickerUserId = this.resolvePreferredResponsibleUserId(
+            order.pickerUserId,
+            pickingItem.session.assignedUserId,
+            responsibleUserId,
+        );
+
+        const currentSessionAssignedUserId = pickingItem.session.assignedUserId ?? null;
+        const currentOrderPickerUserId = order.pickerUserId ?? null;
+
+        if (nextPickerUserId !== currentSessionAssignedUserId) {
+            await prisma.pickingSession.update({
+                where: { id: pickingItem.sessionId },
+                data: { assignedUserId: nextPickerUserId },
+            });
+        }
+
+        if (nextPickerUserId !== currentOrderPickerUserId) {
+            await prisma.order.update({
+                where: { id: order.id },
+                data: { pickerUserId: nextPickerUserId },
+            });
+        }
+
+        await this.syncPickingAndOrderStatus(order.id);
+        return this.getOrderPicking(order.id);
+    }
+
+    async completeOrderPicking(orderId: number, responsibleUserId?: number) {
+        const picking = await this.getOrderPicking(orderId);
+        if (!picking.pickingSession) {
+            throw CustomError.badRequest('La orden no tiene una sesion de picking iniciada');
+        }
+
+        const hasPendingItems = picking.items.some((item: any) => item.status !== 'COMPLETED');
+        if (hasPendingItems) {
+            throw CustomError.badRequest('No se puede finalizar: existen items pendientes o parciales');
+        }
+
+        const currentOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            select: { pickerUserId: true },
+        });
+
+        const assignedUserId = this.resolvePreferredResponsibleUserId(
+            picking.pickingSession.assignedUser?.id,
+            currentOrder?.pickerUserId,
+            responsibleUserId,
+        );
+
+        await prisma.pickingSession.update({
+            where: { id: picking.pickingSession.id },
+            data: {
+                status: 'COMPLETED',
+                assignedUserId,
+            },
+        });
+
+        await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: OrderStatusEnum.READY,
+                pickerUserId: assignedUserId,
+            },
+        });
+
+        return this.getOrderById(orderId);
+    }
+
+    async updateOrderPicking(orderId: number, dto: UpdateOrderPickingDto, responsibleUserId?: number) {
+        await this.startOrderPicking(orderId);
+        const currentPicking = await this.getOrderPicking(orderId);
+        const pickingItemsByVariant = new Map<number, any>(
+            (currentPicking.items || [])
+                .filter((item: any) => Number(item.pickingItemId || 0) > 0)
+                .map((item: any) => [Number(item.variantId), item]),
+        );
+
+        for (const item of dto.items) {
+            const targetItem = pickingItemsByVariant.get(Number(item.variantId));
+            if (!targetItem || !targetItem.pickingItemId) {
+                throw CustomError.badRequest(`No existe item de picking para la variante ${item.variantId}`);
+            }
+
+            await this.updatePickingItem(
+                Number(targetItem.pickingItemId),
+                Number(item.pickedQuantity || 0),
+                responsibleUserId,
+            );
+        }
+
+        return this.getOrderById(orderId);
     }
 
     /**

@@ -6,6 +6,7 @@ import { ListOrderDto } from '../../domain/dtos/list-order.dto';
 import { AssignOrderResponsibleDto } from '../../domain/dtos/assign-order-responsible.dto';
 import { UpdateOrderPickingDto } from '../../domain/dtos/update-order-picking.dto';
 import { CustomError } from '../../domain/errors/custom.error';
+import { AuthRequest } from '../auth/middleware';
 
 export class OrderController {
     constructor(private readonly orderService: OrderService) {}
@@ -91,7 +92,7 @@ export class OrderController {
      * Actualizar estado del pedido
      * PATCH /api/orders/:id/status
      */
-    updateOrderStatus = async (req: Request, res: Response) => {
+    updateOrderStatus = async (req: AuthRequest, res: Response) => {
         const { id } = req.params;
         const [error, dto] = UpdateOrderStatusDto.create(req.body);
 
@@ -104,7 +105,7 @@ export class OrderController {
         }
 
         try {
-            const order = await this.orderService.updateOrderStatus(Number(id), dto!);
+            const order = await this.orderService.updateOrderStatus(Number(id), dto!, req.user?.id);
             res.status(200).json({
                 success: true,
                 data: order,
@@ -216,10 +217,86 @@ export class OrderController {
     };
 
     /**
+     * Obtener reservas de una orden
+     * GET /api/orders/:id/reservations
+     */
+    getOrderReservations = async (req: Request, res: Response) => {
+        const { id } = req.params;
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        try {
+            const reservations = await this.orderService.getOrderReservations(Number(id));
+            res.status(200).json({
+                success: true,
+                data: reservations,
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Obtener estado de picking por orden
+     * GET /api/orders/:id/picking
+     */
+    getOrderPicking = async (req: Request, res: Response) => {
+        const { id } = req.params;
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        try {
+            const picking = await this.orderService.getOrderPicking(Number(id));
+            res.status(200).json({
+                success: true,
+                data: picking,
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Iniciar picking
+     * POST /api/orders/:id/picking/start
+     */
+    startOrderPicking = async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        try {
+            const picking = await this.orderService.startOrderPicking(Number(id), req.user?.id);
+            res.status(200).json({
+                success: true,
+                data: picking,
+                message: 'Picking iniciado exitosamente',
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
      * Actualizar picking del pedido
      * PATCH /api/orders/:id/picking
      */
-    updateOrderPicking = async (req: Request, res: Response) => {
+    updateOrderPicking = async (req: AuthRequest, res: Response) => {
         const { id } = req.params;
         const body = { ...req.body, orderId: Number(id) };
         const [error, dto] = UpdateOrderPickingDto.create(body);
@@ -233,11 +310,68 @@ export class OrderController {
         }
 
         try {
-            const order = await this.orderService.updateOrderPicking(Number(id), dto!);
+            const order = await this.orderService.updateOrderPicking(Number(id), dto!, req.user?.id);
             res.status(200).json({
                 success: true,
                 data: order,
                 message: 'Picking del pedido actualizado exitosamente',
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Actualizar un item de picking
+     * PATCH /api/orders/picking/items/:itemId
+     */
+    updatePickingItem = async (req: AuthRequest, res: Response) => {
+        const { itemId } = req.params;
+        const pickedQuantity = Number(req.body?.pickedQuantity);
+
+        if (!itemId || isNaN(Number(itemId))) {
+            return res.status(400).json({ error: 'ID de item invalido' });
+        }
+
+        if (!Number.isFinite(pickedQuantity) || pickedQuantity < 0) {
+            return res.status(400).json({ error: 'pickedQuantity debe ser >= 0' });
+        }
+
+        try {
+            const picking = await this.orderService.updatePickingItem(Number(itemId), pickedQuantity, req.user?.id);
+            res.status(200).json({
+                success: true,
+                data: picking,
+                message: 'Item de picking actualizado exitosamente',
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Finalizar picking de una orden
+     * PATCH /api/orders/:id/picking/complete
+     */
+    completeOrderPicking = async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        try {
+            const order = await this.orderService.completeOrderPicking(Number(id), req.user?.id);
+            res.status(200).json({
+                success: true,
+                data: order,
+                message: 'Picking finalizado exitosamente',
             });
         } catch (error) {
             if (error instanceof CustomError) {
