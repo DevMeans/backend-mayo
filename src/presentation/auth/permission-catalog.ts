@@ -63,7 +63,9 @@ export const PERMISSION_CATALOG: PermissionCatalogItemDefinition[] = [
     { code: 'picking.view', name: 'Ver picking', module: 'picking', description: 'Permite ver tablero de picking' },
     { code: 'picking.start', name: 'Iniciar picking', module: 'picking', description: 'Permite iniciar picking' },
     { code: 'picking.update', name: 'Actualizar picking', module: 'picking', description: 'Permite actualizar picking' },
-    { code: 'picking.complete', name: 'Completar picking', module: 'picking', description: 'Permite completar picking' }
+    { code: 'picking.complete', name: 'Completar picking', module: 'picking', description: 'Permite completar picking' },
+
+    { code: 'payment_methods.manage', name: 'Gestionar metodos de pago', module: 'payment_methods', description: 'Permite crear, editar y activar metodos de pago' }
 ];
 
 export const ROLE_PERMISSION_MATRIX: Record<string, PermissionCode[]> = {
@@ -108,7 +110,8 @@ export const ROLE_PERMISSION_MATRIX: Record<string, PermissionCode[]> = {
         'picking.view',
         'picking.start',
         'picking.update',
-        'picking.complete'
+        'picking.complete',
+        'payment_methods.manage'
     ],
     SELLER: [
         'dashboard.view',

@@ -12,6 +12,7 @@ import { inventoryRoute } from "./inventory/router";
 import { storeRoute } from "./store/router";
 import { orderRoute } from "./order/router";
 import { publicRoute } from "./public/router";
+import { paymentMethodRoute } from "./payment-method/router";
 
 export class AppRouter{
 
@@ -31,6 +32,7 @@ export class AppRouter{
         router.use('/api/inventory', AuthMiddleware.validateJWT, inventoryRoute.router);
         router.use('/api/stores', AuthMiddleware.validateJWT, storeRoute.router);
         router.use('/api/orders', AuthMiddleware.validateJWT, orderRoute.router);
+        router.use('/api/payment-methods', AuthMiddleware.validateJWT, paymentMethodRoute.router);
 
         return router;
     }
