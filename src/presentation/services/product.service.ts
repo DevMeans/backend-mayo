@@ -1,6 +1,7 @@
 ﻿import { CreateProductDto } from "../../domain/dtos/create-product.dto";
 import { UpdateProductDto } from "../../domain/dtos/update-product.dto";
 import { ListProductDto } from "../../domain/dtos/list-product.dto";
+import { PublicListProductDto } from "../../domain/dtos/public-list-product.dto";
 import { GenerateVariantsDto } from "../../domain/dtos/generate-variants.dto";
 import { prisma } from "../../data/prisma";
 import { Prisma } from "@prisma/client";
@@ -623,6 +624,283 @@ export class ProductService {
             console.error('Error al obtener el producto:', error);
             throw CustomError.internal('Error al obtener el producto');
         }
+    }
+
+    async listPublicProducts(dto: PublicListProductDto): Promise<any> {
+        const { skip, take, search, categoryId, colorId, sizeId, inStock, allowBackorder } = dto;
+
+        const where: Prisma.ProductWhereInput = {
+            isActive: true,
+            variants: {
+                some: {
+                    isActive: true,
+                    ...(colorId ? { colorId } : {}),
+                    ...(sizeId ? { sizeId } : {}),
+                },
+            },
+        };
+
+        if (search) {
+            where.OR = [
+                { name: { contains: search, mode: 'insensitive' } },
+                { description: { contains: search, mode: 'insensitive' } },
+            ];
+        }
+
+        if (categoryId) {
+            where.categoryId = categoryId;
+        }
+
+        const products = await prisma.product.findMany({
+            where,
+            include: {
+                category: true,
+                images: true,
+                variants: {
+                    where: { isActive: true },
+                    include: {
+                        color: true,
+                        size: true,
+                    },
+                },
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        });
+
+        const variantIds = products.flatMap((product) => product.variants.map((variant) => variant.id));
+        const stockGroups = variantIds.length > 0
+            ? await prisma.inventory.groupBy({
+                by: ['variantId'],
+                where: { variantId: { in: variantIds } },
+                _sum: {
+                    stock: true,
+                    reservedStock: true,
+                },
+            })
+            : [];
+
+        const stockByVariant = new Map<number, { stock: number; reservedStock: number; availableStock: number }>();
+        stockGroups.forEach((group) => {
+            const stock = Number(group._sum.stock ?? 0);
+            const reservedStock = Number(group._sum.reservedStock ?? 0);
+            stockByVariant.set(group.variantId, {
+                stock,
+                reservedStock,
+                availableStock: Math.max(0, stock - reservedStock),
+            });
+        });
+
+        const mapped = products.map((product) => {
+            const variants = product.variants.map((variant) => {
+                const stock = stockByVariant.get(variant.id) ?? { stock: 0, reservedStock: 0, availableStock: 0 };
+                const colorName = variant.color?.name ?? '';
+                const sizeName = variant.size?.name ?? '';
+                const isSimpleVariant = this.isSimpleVariantByNames(colorName, sizeName);
+                const isSizeOnlyVariant = this.isSizeOnlyVariantByNames(colorName, sizeName);
+
+                return {
+                    id: variant.id,
+                    sku: variant.sku,
+                    barcode: variant.barcode,
+                    price: Number(variant.price || 0),
+                    imageUrl: variant.imageUrl,
+                    color: (isSimpleVariant || isSizeOnlyVariant) ? null : variant.color,
+                    size: isSimpleVariant ? null : variant.size,
+                    availableStock: stock.availableStock,
+                    reservedStock: stock.reservedStock,
+                    isSimpleVariant,
+                    isSizeOnlyVariant,
+                };
+            });
+
+            const prices = variants.map((variant) => Number(variant.price || 0)).filter((price) => Number.isFinite(price));
+            const minPrice = prices.length ? Math.min(...prices) : 0;
+            const maxPrice = prices.length ? Math.max(...prices) : minPrice;
+            const totalAvailableStock = variants.reduce((sum, variant) => sum + Number(variant.availableStock || 0), 0);
+            const hasStock = totalAvailableStock > 0;
+            const colorsMap = new Map<number, { id: number; name: string; hex: string | null }>();
+            const sizesMap = new Map<number, { id: number; name: string }>();
+
+            variants.forEach((variant) => {
+                if (variant.color && !colorsMap.has(variant.color.id)) {
+                    colorsMap.set(variant.color.id, {
+                        id: variant.color.id,
+                        name: variant.color.name,
+                        hex: variant.color.hex ?? null,
+                    });
+                }
+                if (variant.size && !sizesMap.has(variant.size.id)) {
+                    sizesMap.set(variant.size.id, {
+                        id: variant.size.id,
+                        name: variant.size.name,
+                    });
+                }
+            });
+
+            const colors = Array.from(colorsMap.values());
+            const sizes = Array.from(sizesMap.values());
+
+            return {
+                id: product.id,
+                name: product.name,
+                description: product.description,
+                category: product.category ? { id: product.category.id, name: product.category.name } : null,
+                imageUrl: product.images?.[0]?.url || variants.find((variant) => !!variant.imageUrl)?.imageUrl || null,
+                images: (product.images || []).map((image) => ({ id: image.id, url: image.url })),
+                variants,
+                colors,
+                sizes,
+                minPrice,
+                maxPrice,
+                totalAvailableStock,
+                hasStock,
+                allowBackorder: true,
+                availabilityLabel: hasStock ? 'Disponible' : 'Pedido sujeto a confirmacion',
+            };
+        });
+
+        const filtered = mapped.filter((product) => {
+            if (inStock === true && !product.hasStock) {
+                return false;
+            }
+            if (inStock === false && product.hasStock) {
+                return false;
+            }
+            if (allowBackorder === false && !product.hasStock) {
+                return false;
+            }
+            return true;
+        });
+
+        const start = (skip - 1) * take;
+        const paginated = filtered.slice(start, start + take);
+
+        return {
+            data: paginated,
+            total: filtered.length,
+            page: skip,
+            limit: take,
+            hasMore: (skip * take) < filtered.length,
+        };
+    }
+
+    async getPublicProductById(id: number): Promise<any> {
+        const product = await prisma.product.findFirst({
+            where: {
+                id,
+                isActive: true,
+                variants: {
+                    some: { isActive: true },
+                },
+            },
+            include: {
+                category: true,
+                images: true,
+                variants: {
+                    where: { isActive: true },
+                    include: {
+                        color: true,
+                        size: true,
+                    },
+                },
+            },
+        });
+
+        if (!product) {
+            throw CustomError.notFound('Producto no encontrado o inactivo');
+        }
+
+        const variantIds = product.variants.map((variant) => variant.id);
+        const stockGroups = variantIds.length > 0
+            ? await prisma.inventory.groupBy({
+                by: ['variantId'],
+                where: { variantId: { in: variantIds } },
+                _sum: {
+                    stock: true,
+                    reservedStock: true,
+                },
+            })
+            : [];
+
+        const stockByVariant = new Map<number, { stock: number; reservedStock: number; availableStock: number }>();
+        stockGroups.forEach((group) => {
+            const stock = Number(group._sum.stock ?? 0);
+            const reservedStock = Number(group._sum.reservedStock ?? 0);
+            stockByVariant.set(group.variantId, {
+                stock,
+                reservedStock,
+                availableStock: Math.max(0, stock - reservedStock),
+            });
+        });
+
+        const variants = product.variants.map((variant) => {
+            const stock = stockByVariant.get(variant.id) ?? { stock: 0, reservedStock: 0, availableStock: 0 };
+            const colorName = variant.color?.name ?? '';
+            const sizeName = variant.size?.name ?? '';
+            const isSimpleVariant = this.isSimpleVariantByNames(colorName, sizeName);
+            const isSizeOnlyVariant = this.isSizeOnlyVariantByNames(colorName, sizeName);
+
+            return {
+                id: variant.id,
+                sku: variant.sku,
+                barcode: variant.barcode,
+                price: Number(variant.price || 0),
+                imageUrl: variant.imageUrl,
+                color: (isSimpleVariant || isSizeOnlyVariant) ? null : variant.color,
+                size: isSimpleVariant ? null : variant.size,
+                availableStock: stock.availableStock,
+                reservedStock: stock.reservedStock,
+                isSimpleVariant,
+                isSizeOnlyVariant,
+            };
+        });
+
+        const prices = variants.map((variant) => Number(variant.price || 0)).filter((price) => Number.isFinite(price));
+        const minPrice = prices.length ? Math.min(...prices) : 0;
+        const maxPrice = prices.length ? Math.max(...prices) : minPrice;
+        const totalAvailableStock = variants.reduce((sum, variant) => sum + Number(variant.availableStock || 0), 0);
+        const hasStock = totalAvailableStock > 0;
+        const colorsMap = new Map<number, { id: number; name: string; hex: string | null }>();
+        const sizesMap = new Map<number, { id: number; name: string }>();
+
+        variants.forEach((variant) => {
+            if (variant.color && !colorsMap.has(variant.color.id)) {
+                colorsMap.set(variant.color.id, {
+                    id: variant.color.id,
+                    name: variant.color.name,
+                    hex: variant.color.hex ?? null,
+                });
+            }
+            if (variant.size && !sizesMap.has(variant.size.id)) {
+                sizesMap.set(variant.size.id, {
+                    id: variant.size.id,
+                    name: variant.size.name,
+                });
+            }
+        });
+
+        const colors = Array.from(colorsMap.values());
+        const sizes = Array.from(sizesMap.values());
+
+        return {
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            category: product.category ? { id: product.category.id, name: product.category.name } : null,
+            imageUrl: product.images?.[0]?.url || variants.find((variant) => !!variant.imageUrl)?.imageUrl || null,
+            images: (product.images || []).map((image) => ({ id: image.id, url: image.url })),
+            variants,
+            colors,
+            sizes,
+            minPrice,
+            maxPrice,
+            totalAvailableStock,
+            hasStock,
+            allowBackorder: true,
+            availabilityLabel: hasStock ? 'Disponible' : 'Pedido sujeto a confirmacion',
+        };
     }
 
     /**

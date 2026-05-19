@@ -5,6 +5,8 @@ import { UpdateOrderStatusDto, OrderStatusEnum } from "../../domain/dtos/update-
 import { ListOrderDto } from "../../domain/dtos/list-order.dto";
 import { AssignOrderResponsibleDto } from "../../domain/dtos/assign-order-responsible.dto";
 import { UpdateOrderPickingDto } from "../../domain/dtos/update-order-picking.dto";
+import { CreateMarketplaceOrderDto } from "../../domain/dtos/create-marketplace-order.dto";
+import { TrackMarketplaceOrderDto } from "../../domain/dtos/track-marketplace-order.dto";
 
 export class OrderService {
     constructor() {}
@@ -29,6 +31,39 @@ export class OrderService {
             return 'ECOMMERCE';
         }
         return 'INTERNAL';
+    }
+
+    private mapPublicOrderStatus(status: OrderStatusEnum): 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado' {
+        const map: Record<OrderStatusEnum, 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado'> = {
+            [OrderStatusEnum.PENDING]: 'En revision',
+            [OrderStatusEnum.CONFIRMED]: 'Confirmado',
+            [OrderStatusEnum.WAITING_TRANSFER]: 'Esperando stock',
+            [OrderStatusEnum.PREPARING]: 'En preparacion',
+            [OrderStatusEnum.READY]: 'Listo para entrega',
+            [OrderStatusEnum.DELIVERED]: 'Entregado',
+            [OrderStatusEnum.CANCELLED]: 'Cancelado',
+            [OrderStatusEnum.WAITING_STOCK]: 'Esperando stock',
+        };
+        return map[status];
+    }
+
+    private buildMarketplaceNote(dto: CreateMarketplaceOrderDto, autoNote?: string): string {
+        const chunks: string[] = ['CHANNEL: ECOMMERCE', 'ORIGIN: MARKETPLACE'];
+        chunks.push(`DELIVERY_TYPE: ${dto.deliveryType}`);
+
+        if (dto.companyName) chunks.push(`EMPRESA: ${dto.companyName}`);
+        if (dto.ruc) chunks.push(`RUC: ${dto.ruc}`);
+        if (dto.deliveryType === 'DELIVERY') {
+            if (dto.deliveryAddress) chunks.push(`DIRECCION: ${dto.deliveryAddress}`);
+            if (dto.deliveryReference) chunks.push(`REFERENCIA: ${dto.deliveryReference}`);
+        }
+        if (dto.deliveryType === 'PICKUP' && dto.pickupStoreId) {
+            chunks.push(`RECOJO_TIENDA_ID: ${dto.pickupStoreId}`);
+        }
+        if (dto.note) chunks.push(`NOTA_CLIENTE: ${dto.note}`);
+        if (autoNote) chunks.push(autoNote);
+
+        return chunks.join(' | ');
     }
 
     private resolvePickedQuantity(orderItem: any, order?: any): number {
@@ -64,12 +99,18 @@ export class OrderService {
             ...order,
             items: items.map((item: any) => {
                 const requestedQuantity = Number(item.quantity || 0);
+                const reservedQuantity = Number(item.reserved || 0);
+                const pendingStockQuantity = Math.max(0, requestedQuantity - reservedQuantity);
                 const pickedQuantity = this.resolvePickedQuantity(item, order);
-                const pendingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
+                const pendingPickingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
                 return {
                     ...item,
+                    requestedQuantity,
+                    reservedQuantity,
+                    pendingStockQuantity,
                     pickedQuantity,
-                    pendingQuantity,
+                    pendingQuantity: pendingPickingQuantity,
+                    pendingPickingQuantity,
                     pickingStatus: this.mapPickingItemStatus(pickedQuantity, requestedQuantity),
                 };
             }),
@@ -350,6 +391,304 @@ export class OrderService {
         }
 
         return order;
+    }
+
+    async createMarketplaceOrder(dto: CreateMarketplaceOrderDto) {
+        const sourceStore = await prisma.store.findFirst({
+            where: { id: dto.sourceStoreId, isActive: true },
+        });
+        if (!sourceStore) {
+            throw CustomError.badRequest(`La tienda origen con ID ${dto.sourceStoreId} no existe o esta inactiva`);
+        }
+
+        if (dto.pickupStoreId) {
+            const pickupStore = await prisma.store.findFirst({
+                where: { id: dto.pickupStoreId, isActive: true },
+            });
+            if (!pickupStore) {
+                throw CustomError.badRequest('La tienda de recojo no existe o esta inactiva');
+            }
+        }
+
+        const variantIds = dto.items.map((item) => item.variantId);
+        const variants = await prisma.productVariant.findMany({
+            where: {
+                id: { in: variantIds },
+                isActive: true,
+                product: { isActive: true },
+            },
+            include: {
+                product: true,
+            },
+        });
+
+        if (variants.length !== variantIds.length) {
+            throw CustomError.badRequest('Una o mas variantes seleccionadas no existen o estan inactivas');
+        }
+
+        const variantMap = new Map<number, typeof variants[number]>();
+        variants.forEach((variant) => variantMap.set(variant.id, variant));
+
+        const orderCode = this.generateOrderCode().replace('ORD-', 'MK-');
+        const normalizedClientName = dto.companyName
+            ? `${dto.clientName} (${dto.companyName})`
+            : dto.clientName;
+
+        const summary = await prisma.$transaction(async (tx) => {
+            const calculatedItems: Array<{
+                variantId: number;
+                requestedQuantity: number;
+                reservedQuantity: number;
+                pendingQuantity: number;
+                availableStock: number;
+                unitPrice: number;
+                lineSubtotal: number;
+                inventoryId: number;
+            }> = [];
+            let subtotal = 0;
+            let totalRequested = 0;
+            let totalReserved = 0;
+            let totalPending = 0;
+
+            for (const item of dto.items) {
+                const variant = variantMap.get(item.variantId);
+                if (!variant) {
+                    throw CustomError.badRequest(`Variante ${item.variantId} no encontrada`);
+                }
+
+                const inventory = await tx.inventory.upsert({
+                    where: {
+                        storeId_variantId: {
+                            storeId: dto.sourceStoreId,
+                            variantId: item.variantId,
+                        },
+                    },
+                    create: {
+                        storeId: dto.sourceStoreId,
+                        variantId: item.variantId,
+                        stock: 0,
+                        reservedStock: 0,
+                    },
+                    update: {},
+                });
+
+                const availableStock = Math.max(0, Number(inventory.stock || 0) - Number(inventory.reservedStock || 0));
+                const requestedQuantity = Number(item.quantity || 0);
+                const reservedQuantity = Math.max(0, Math.min(requestedQuantity, availableStock));
+                const pendingQuantity = Math.max(0, requestedQuantity - reservedQuantity);
+                const unitPrice = Number(item.unitPrice ?? variant.price ?? 0);
+                const lineSubtotal = requestedQuantity * unitPrice;
+
+                totalRequested += requestedQuantity;
+                totalReserved += reservedQuantity;
+                totalPending += pendingQuantity;
+                subtotal += lineSubtotal;
+
+                calculatedItems.push({
+                    variantId: item.variantId,
+                    requestedQuantity,
+                    reservedQuantity,
+                    pendingQuantity,
+                    availableStock,
+                    unitPrice,
+                    lineSubtotal,
+                    inventoryId: inventory.id,
+                });
+            }
+
+            const tax = subtotal * 0.18;
+            const total = subtotal + tax;
+            const status = totalPending > 0 ? OrderStatusEnum.WAITING_STOCK : OrderStatusEnum.CONFIRMED;
+
+            const order = await tx.order.create({
+                data: {
+                    code: orderCode,
+                    status,
+                    sourceStoreId: dto.sourceStoreId,
+                    fulfillmentStoreId: dto.sourceStoreId,
+                    clientName: normalizedClientName,
+                    clientEmail: dto.clientEmail ?? null,
+                    clientPhone: dto.clientPhone,
+                    subtotal,
+                    tax,
+                    total,
+                    note: this.buildMarketplaceNote(
+                        dto,
+                        totalPending > 0
+                            ? `RESERVA: parcial. Pendiente ${totalPending} unidades`
+                            : 'RESERVA: completa',
+                    ),
+                    items: {
+                        create: calculatedItems.map((item) => ({
+                            variantId: item.variantId,
+                            quantity: item.requestedQuantity,
+                            reserved: item.reservedQuantity,
+                            picked: 0,
+                            unitPrice: item.unitPrice,
+                            subtotal: item.lineSubtotal,
+                            status: item.reservedQuantity >= item.requestedQuantity
+                                ? 'PENDING'
+                                : (item.reservedQuantity > 0 ? 'PARTIAL' : 'PENDING'),
+                        })),
+                    },
+                },
+                include: {
+                    items: true,
+                    sourceStore: true,
+                    fulfillmentStore: true,
+                },
+            });
+
+            for (const item of calculatedItems) {
+                if (item.reservedQuantity <= 0) {
+                    continue;
+                }
+
+                await tx.reservation.create({
+                    data: {
+                        quantity: item.reservedQuantity,
+                        status: 'ACTIVE',
+                        inventoryId: item.inventoryId,
+                        variantId: item.variantId,
+                        orderId: order.id,
+                    },
+                });
+
+                await tx.inventory.update({
+                    where: { id: item.inventoryId },
+                    data: {
+                        reservedStock: {
+                            increment: item.reservedQuantity,
+                        },
+                    },
+                });
+            }
+
+            const detailedOrder = await tx.order.findUnique({
+                where: { id: order.id },
+                include: this.orderDetailInclude,
+            });
+
+            if (!detailedOrder) {
+                throw CustomError.internal('No se pudo recuperar el pedido marketplace creado');
+            }
+
+            return {
+                order: detailedOrder,
+                metrics: {
+                    totalRequested,
+                    totalReserved,
+                    totalPending,
+                },
+            };
+        });
+
+        return {
+            ...this.mapOrderWithPresentationData(summary.order),
+            stockSummary: summary.metrics,
+            reviewMessage: 'Pedido sujeto a confirmacion de disponibilidad',
+        };
+    }
+
+    async getMarketplaceOrderByCode(code: string) {
+        const order = await prisma.order.findFirst({
+            where: {
+                code,
+                note: { contains: 'CHANNEL: ECOMMERCE', mode: 'insensitive' },
+            },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound('Pedido no encontrado');
+        }
+
+        const mapped = this.mapOrderWithPresentationData(order);
+        return {
+            code: mapped.code,
+            status: mapped.status,
+            publicStatus: this.mapPublicOrderStatus(mapped.status as OrderStatusEnum),
+            createdAt: mapped.createdAt,
+            clientName: mapped.clientName,
+            clientPhone: mapped.clientPhone,
+            totals: {
+                subtotal: Number(mapped.subtotal || 0),
+                tax: Number(mapped.tax || 0),
+                total: Number(mapped.total || 0),
+            },
+            items: (mapped.items || []).map((item: any) => ({
+                variantId: item.variantId,
+                productName: item.variant?.product?.name || 'Producto',
+                colorName: item.variant?.color?.name || 'Sin color',
+                sizeName: item.variant?.size?.name || 'Sin talla',
+                requestedQuantity: Number(item.requestedQuantity ?? item.quantity ?? 0),
+                reservedQuantity: Number(item.reservedQuantity ?? item.reserved ?? 0),
+                pendingQuantity: Number(item.pendingStockQuantity ?? 0),
+                unitPrice: Number(item.unitPrice || 0),
+                subtotal: Number(item.subtotal || 0),
+            })),
+            reviewMessage: 'Pedido recibido. Nuestro equipo revisara disponibilidad y te contactara.',
+        };
+    }
+
+    async trackMarketplaceOrder(dto: TrackMarketplaceOrderDto) {
+        const order = await prisma.order.findFirst({
+            where: {
+                code: dto.code,
+                clientPhone: dto.phone,
+                note: { contains: 'CHANNEL: ECOMMERCE', mode: 'insensitive' },
+            },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound('No se encontro un pedido con esos datos');
+        }
+
+        const mapped = this.mapOrderWithPresentationData(order);
+        const items: Array<{
+            productName: string;
+            colorName: string;
+            sizeName: string;
+            requestedQuantity: number;
+            reservedQuantity: number;
+            pendingQuantity: number;
+        }> = (mapped.items || []).map((item: any) => ({
+            productName: item.variant?.product?.name || 'Producto',
+            colorName: item.variant?.color?.name || 'Sin color',
+            sizeName: item.variant?.size?.name || 'Sin talla',
+            requestedQuantity: Number(item.requestedQuantity ?? item.quantity ?? 0),
+            reservedQuantity: Number(item.reservedQuantity ?? item.reserved ?? 0),
+            pendingQuantity: Number(item.pendingStockQuantity ?? 0),
+        }));
+
+        const hasPending = items.some((item: { pendingQuantity: number }) => item.pendingQuantity > 0);
+        return {
+            code: mapped.code,
+            status: mapped.status,
+            publicStatus: this.mapPublicOrderStatus(mapped.status as OrderStatusEnum),
+            createdAt: mapped.createdAt,
+            items,
+            hasPending,
+            reviewMessage: hasPending
+                ? 'Pedido en revision: hay cantidades pendientes por confirmar'
+                : 'Pedido confirmado para preparacion',
+        };
+    }
+
+    async listMarketplaceStores() {
+        const stores = await prisma.store.findMany({
+            where: { isActive: true },
+            select: {
+                id: true,
+                name: true,
+                code: true,
+                type: true,
+            },
+            orderBy: { name: 'asc' },
+        });
+
+        return stores;
     }
 
     /**

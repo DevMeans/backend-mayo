@@ -11,6 +11,7 @@ import { productRoute } from "./product/router";
 import { inventoryRoute } from "./inventory/router";
 import { storeRoute } from "./store/router";
 import { orderRoute } from "./order/router";
+import { publicRoute } from "./public/router";
 
 export class AppRouter{
 
@@ -19,6 +20,7 @@ export class AppRouter{
         router.use('/api/auth', AuthRouter.router);
         router.use('/api/users', UserRouter.router);
         router.use('/api/roles', RoleRouter.router);
+        router.use('/api/public', publicRoute.router);
         router.get('/api/permissions', AuthMiddleware.validateJWT, AuthMiddleware.requirePermission('roles.permissions'), RoleController.listPermissions);
 
         // Rutas protegidas - requieren autenticación
