@@ -11,6 +11,10 @@ import { ProductImageEntity } from "../../domain/entities/product-image.entity";
 import { cloudinary } from "../../config/cloudinary";
 
 export class ProductService {
+    private readonly simpleColorName = '__SIN_COLOR__';
+    private readonly simpleSizeName = '__SIN_TALLA__';
+    private readonly simpleColorHex = '#9CA3AF';
+
     constructor() { }
 
     /**
@@ -72,6 +76,82 @@ export class ProductService {
         if (sizes.length !== sizeIds.length) {
             throw CustomError.badRequest('Una o más tallas seleccionadas no existen o están inactivas');
         }
+    }
+
+    private async ensureSimpleColor(): Promise<{ id: number; name: string }> {
+        const color = await prisma.color.upsert({
+            where: { name: this.simpleColorName },
+            update: { isActive: false, hex: this.simpleColorHex },
+            create: { name: this.simpleColorName, hex: this.simpleColorHex, isActive: false },
+        });
+
+        return {
+            id: color.id,
+            name: color.name,
+        };
+    }
+
+    private async ensureSimpleSize(): Promise<{ id: number; name: string }> {
+        const size = await prisma.size.upsert({
+            where: { name: this.simpleSizeName },
+            update: { isActive: false },
+            create: { name: this.simpleSizeName, isActive: false },
+        });
+
+        return {
+            id: size.id,
+            name: size.name,
+        };
+    }
+
+    private async ensureSimpleVariantDimensions(): Promise<{ colorId: number; sizeId: number; colorName: string; sizeName: string }> {
+        const [color, size] = await Promise.all([
+            this.ensureSimpleColor(),
+            this.ensureSimpleSize(),
+        ]);
+
+        return {
+            colorId: color.id,
+            sizeId: size.id,
+            colorName: color.name,
+            sizeName: size.name,
+        };
+    }
+
+    private isSimpleVariantByNames(colorName?: string | null, sizeName?: string | null): boolean {
+        return colorName === this.simpleColorName && sizeName === this.simpleSizeName;
+    }
+
+    private isSizeOnlyVariantByNames(colorName?: string | null, sizeName?: string | null): boolean {
+        return colorName === this.simpleColorName && sizeName !== this.simpleSizeName;
+    }
+
+    private mapVariantForResponse(variant: any) {
+        const colorName = variant?.color?.name ?? null;
+        const sizeName = variant?.size?.name ?? null;
+        const isSimpleVariant = this.isSimpleVariantByNames(colorName, sizeName);
+
+        return {
+            ...ProductVariantEntity.fromObject(variant),
+            color: (isSimpleVariant || this.isSizeOnlyVariantByNames(colorName, sizeName)) ? null : variant.color,
+            size: isSimpleVariant ? null : variant.size,
+            isSimpleVariant,
+            isSizeOnlyVariant: this.isSizeOnlyVariantByNames(colorName, sizeName),
+        };
+    }
+
+    private resolveProductVariantMode(variants: any[]): 'MATRIX' | 'SIMPLE' | 'SIZE_ONLY' {
+        if (!Array.isArray(variants) || variants.length === 0) {
+            return 'MATRIX';
+        }
+
+        const allSimple = variants.every((variant: any) => this.isSimpleVariantByNames(variant?.color?.name, variant?.size?.name));
+        if (allSimple) {
+            return 'SIMPLE';
+        }
+
+        const allSizeOnly = variants.every((variant: any) => this.isSizeOnlyVariantByNames(variant?.color?.name, variant?.size?.name));
+        return allSizeOnly ? 'SIZE_ONLY' : 'MATRIX';
     }
 
     /**
@@ -184,32 +264,154 @@ export class ProductService {
      * Crear un nuevo producto con variantes e imágenes
      */
     async createProduct(createProductDto: CreateProductDto): Promise<any> {
-        const { name, categoryId, description, colorIds, sizeIds, imageUrls = [], imageFiles = [], variants } = createProductDto;
+        const {
+            name,
+            categoryId,
+            description,
+            variantMode,
+            colorIds = [],
+            sizeIds = [],
+            imageUrls = [],
+            imageFiles = [],
+            variants = [],
+        } = createProductDto;
 
         console.log('Creando producto con datos:', {
             name,
             categoryId,
             description,
+            variantMode,
             colorIds,
             sizeIds,
             imageUrls,
             imageFilesCount: imageFiles.length,
-            variantsCount: variants?.length
+            variantsCount: variants.length
         });
 
         try {
             // Validar que la categoría existe
             await this.validateCategory(categoryId);
 
-            // Validar que los colores existen
-            await this.validateColors(colorIds);
-
-            // Validar que las tallas existen
-            await this.validateSizes(sizeIds);
-
             // Validar que hay variantes
-            if (!variants || variants.length === 0) {
+            if (variants.length === 0) {
                 throw CustomError.badRequest('Debe haber al menos una variante para crear el producto');
+            }
+
+            const isSimpleMode = variantMode === 'SIMPLE';
+            const isSizeOnlyMode = variantMode === 'SIZE_ONLY';
+            let variantsToCreate: Array<{
+                colorId: number;
+                sizeId: number;
+                price: number;
+                imageUrl?: string;
+                imageFile?: { filename: string; data: string };
+            }> = [];
+
+            let colorById = new Map<number, string>();
+            let sizeById = new Map<number, string>();
+
+            if (isSimpleMode) {
+                const simpleDimensions = await this.ensureSimpleVariantDimensions();
+                const baseVariant = variants[0];
+
+                if (!baseVariant) {
+                    throw CustomError.badRequest('Debe enviar una variante base para el modo SIMPLE');
+                }
+
+                const simpleVariant: {
+                    colorId: number;
+                    sizeId: number;
+                    price: number;
+                    imageUrl?: string;
+                    imageFile?: { filename: string; data: string };
+                } = {
+                    colorId: simpleDimensions.colorId,
+                    sizeId: simpleDimensions.sizeId,
+                    price: Number(baseVariant.price),
+                };
+
+                if (baseVariant.imageUrl) {
+                    simpleVariant.imageUrl = baseVariant.imageUrl;
+                }
+
+                if (baseVariant.imageFile) {
+                    simpleVariant.imageFile = baseVariant.imageFile;
+                }
+
+                variantsToCreate = [simpleVariant];
+                colorById.set(simpleDimensions.colorId, simpleDimensions.colorName);
+                sizeById.set(simpleDimensions.sizeId, simpleDimensions.sizeName);
+            } else if (isSizeOnlyMode) {
+                await this.validateSizes(sizeIds);
+
+                const simpleColor = await this.ensureSimpleColor();
+                const uniqueSizeIds = [...new Set(variants.map((variant) => Number(variant.sizeId || 0)).filter((id) => id > 0))];
+                await this.validateSizes(uniqueSizeIds);
+
+                variantsToCreate = variants.map((variant) => {
+                    const sizeOnlyVariant: {
+                        colorId: number;
+                        sizeId: number;
+                        price: number;
+                        imageUrl?: string;
+                        imageFile?: { filename: string; data: string };
+                    } = {
+                        colorId: simpleColor.id,
+                        sizeId: Number(variant.sizeId),
+                        price: Number(variant.price),
+                    };
+
+                    if (variant.imageUrl) {
+                        sizeOnlyVariant.imageUrl = variant.imageUrl;
+                    }
+
+                    if (variant.imageFile) {
+                        sizeOnlyVariant.imageFile = variant.imageFile;
+                    }
+
+                    return sizeOnlyVariant;
+                });
+
+                const sizeRecords = await prisma.size.findMany({ where: { id: { in: uniqueSizeIds } } });
+                colorById.set(simpleColor.id, simpleColor.name);
+                sizeById = new Map(sizeRecords.map((size) => [size.id, size.name]));
+            } else {
+                // Validar que los colores existen
+                await this.validateColors(colorIds);
+
+                // Validar que las tallas existen
+                await this.validateSizes(sizeIds);
+
+                variantsToCreate = variants.map((variant) => {
+                    const matrixVariant: {
+                        colorId: number;
+                        sizeId: number;
+                        price: number;
+                        imageUrl?: string;
+                        imageFile?: { filename: string; data: string };
+                    } = {
+                        colorId: Number(variant.colorId),
+                        sizeId: Number(variant.sizeId),
+                        price: Number(variant.price),
+                    };
+
+                    if (variant.imageUrl) {
+                        matrixVariant.imageUrl = variant.imageUrl;
+                    }
+
+                    if (variant.imageFile) {
+                        matrixVariant.imageFile = variant.imageFile;
+                    }
+
+                    return matrixVariant;
+                });
+
+                const uniqueColorIds = [...new Set(variantsToCreate.map((variant) => variant.colorId))];
+                const uniqueSizeIds = [...new Set(variantsToCreate.map((variant) => variant.sizeId))];
+                const colorRecords = await prisma.color.findMany({ where: { id: { in: uniqueColorIds } } });
+                const sizeRecords = await prisma.size.findMany({ where: { id: { in: uniqueSizeIds } } });
+                colorById = new Map(colorRecords.map((color) => [color.id, color.name]));
+                sizeById = new Map(sizeRecords.map((size) => [size.id, size.name]));
             }
 
             const now = new Date();
@@ -239,14 +441,8 @@ export class ProductService {
                 });
             }
 
-            // Crear las variantes
-            const colorRecords = await prisma.color.findMany({ where: { id: { in: colorIds } } });
-            const sizeRecords = await prisma.size.findMany({ where: { id: { in: sizeIds } } });
-            const colorById = new Map(colorRecords.map(color => [color.id, color.name]));
-            const sizeById = new Map(sizeRecords.map(size => [size.id, size.name]));
-
             const createdVariants = await Promise.all(
-                variants.map(async variant => {
+                variantsToCreate.map(async (variant) => {
                     const imageUrl = await this.uploadVariantImage(product.id, variant);
                     const colorName = colorById.get(variant.colorId) ?? '';
                     const sizeName = sizeById.get(variant.sizeId) ?? '';
@@ -270,10 +466,15 @@ export class ProductService {
                     ...ProductEntity.fromObject(product),
                     variantCount: createdVariants.length,
                     imageCount: allImageUrls.length,
+                    variantMode,
                 },
                 variants: createdVariants.map(v => ProductVariantEntity.fromObject(v)),
                 images: allImageUrls,
-                message: `Producto "${name}" creado exitosamente con ${createdVariants.length} variantes`,
+                message: isSimpleMode
+                    ? `Producto "${name}" creado exitosamente como producto unico`
+                    : isSizeOnlyMode
+                        ? `Producto "${name}" creado exitosamente como producto con talla`
+                    : `Producto "${name}" creado exitosamente con ${createdVariants.length} variantes`,
             };
         } catch (error) {
             if (error instanceof CustomError) {
@@ -355,18 +556,18 @@ export class ProductService {
             const total = await prisma.product.count({ where });
 
             // Mapear a entidades
-            const mappedProducts = products.map((product: any) => ({
-                ...ProductEntity.fromObject(product),
-                category: product.category,
-                variantCount: product.variants.length,
-                imageCount: product.images?.length || 0,
-                variants: product.variants.map((v: any) => ({
-                    ...ProductVariantEntity.fromObject(v),
-                    color: v.color,
-                    size: v.size,
-                })),
-                images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
-            }));
+            const mappedProducts = products.map((product: any) => {
+                const mappedVariants = (product.variants || []).map((variant: any) => this.mapVariantForResponse(variant));
+                return {
+                    ...ProductEntity.fromObject(product),
+                    category: product.category,
+                    variantCount: mappedVariants.length,
+                    imageCount: product.images?.length || 0,
+                    variantMode: this.resolveProductVariantMode(product.variants || []),
+                    variants: mappedVariants,
+                    images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
+                };
+            });
 
             return {
                 data: mappedProducts,
@@ -404,16 +605,15 @@ export class ProductService {
                 throw CustomError.notFound(`El producto con ID ${id} no existe`);
             }
 
+            const mappedVariants = (product.variants || []).map((variant: any) => this.mapVariantForResponse(variant));
+
             return {
                 ...ProductEntity.fromObject(product),
                 category: product.category,
-                variantCount: product.variants.length,
+                variantCount: mappedVariants.length,
                 imageCount: (product.images || []).length,
-                variants: product.variants.map((v: any) => ({
-                    ...ProductVariantEntity.fromObject(v),
-                    color: v.color,
-                    size: v.size,
-                })),
+                variantMode: this.resolveProductVariantMode(product.variants || []),
+                variants: mappedVariants,
                 images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
             };
         } catch (error) {
@@ -508,6 +708,71 @@ export class ProductService {
         );
     }
 
+    private async replaceSimpleVariant(
+        productId: number,
+        productName: string,
+        variant: { price: number; imageUrl?: string; imageFile?: { filename: string; data: string } },
+    ) {
+        const simpleDimensions = await this.ensureSimpleVariantDimensions();
+        const simpleVariant: {
+            colorId: number;
+            sizeId: number;
+            price: number;
+            imageUrl?: string;
+            imageFile?: { filename: string; data: string };
+        } = {
+            colorId: simpleDimensions.colorId,
+            sizeId: simpleDimensions.sizeId,
+            price: Number(variant.price),
+        };
+
+        if (variant.imageUrl) {
+            simpleVariant.imageUrl = variant.imageUrl;
+        }
+
+        if (variant.imageFile) {
+            simpleVariant.imageFile = variant.imageFile;
+        }
+
+        return this.replaceVariants(productId, productName, [simpleVariant]);
+    }
+
+    private async replaceSizeOnlyVariants(
+        productId: number,
+        productName: string,
+        variants: Array<{ sizeId?: number; price: number; imageUrl?: string; imageFile?: { filename: string; data: string } }>,
+    ) {
+        const simpleColor = await this.ensureSimpleColor();
+        const normalizedSizeIds = [...new Set(variants.map((variant) => Number(variant.sizeId || 0)).filter((id) => id > 0))];
+        await this.validateSizes(normalizedSizeIds);
+
+        const sizeOnlyVariants = variants.map((variant) => {
+            const mapped: {
+                colorId: number;
+                sizeId: number;
+                price: number;
+                imageUrl?: string;
+                imageFile?: { filename: string; data: string };
+            } = {
+                colorId: simpleColor.id,
+                sizeId: Number(variant.sizeId),
+                price: Number(variant.price),
+            };
+
+            if (variant.imageUrl) {
+                mapped.imageUrl = variant.imageUrl;
+            }
+
+            if (variant.imageFile) {
+                mapped.imageFile = variant.imageFile;
+            }
+
+            return mapped;
+        });
+
+        return this.replaceVariants(productId, productName, sizeOnlyVariants);
+    }
+
     /**
      * Actualizar un producto
      */
@@ -526,11 +791,14 @@ export class ProductService {
                 await this.validateCategory(updateData.categoryId);
             }
 
-            if (updateData.colorIds) {
+            const isSimpleMode = updateData.variantMode === 'SIMPLE';
+            const isSizeOnlyMode = updateData.variantMode === 'SIZE_ONLY';
+
+            if (updateData.colorIds && !isSimpleMode && !isSizeOnlyMode) {
                 await this.validateColors(updateData.colorIds);
             }
 
-            if (updateData.sizeIds) {
+            if (updateData.sizeIds && !isSimpleMode) {
                 await this.validateSizes(updateData.sizeIds);
             }
 
@@ -540,7 +808,44 @@ export class ProductService {
 
             if (updateData.variants) {
                 const productName = updateData.name ?? product.name;
-                await this.replaceVariants(id, productName, updateData.variants);
+                if (isSimpleMode) {
+                    const firstVariant = updateData.variants[0];
+                    if (!firstVariant) {
+                        throw CustomError.badRequest('Debe enviar una variante para el modo SIMPLE');
+                    }
+
+                    await this.replaceSimpleVariant(id, productName, firstVariant);
+                } else if (isSizeOnlyMode) {
+                    await this.replaceSizeOnlyVariants(id, productName, updateData.variants);
+                } else {
+                    await this.replaceVariants(
+                        id,
+                        productName,
+                        updateData.variants.map((variant) => {
+                            const matrixVariant: {
+                                colorId: number;
+                                sizeId: number;
+                                price: number;
+                                imageUrl?: string;
+                                imageFile?: { filename: string; data: string };
+                            } = {
+                                colorId: Number(variant.colorId),
+                                sizeId: Number(variant.sizeId),
+                                price: Number(variant.price),
+                            };
+
+                            if (variant.imageUrl) {
+                                matrixVariant.imageUrl = variant.imageUrl;
+                            }
+
+                            if (variant.imageFile) {
+                                matrixVariant.imageFile = variant.imageFile;
+                            }
+
+                            return matrixVariant;
+                        }),
+                    );
+                }
             }
 
             const updated = await prisma.product.update({

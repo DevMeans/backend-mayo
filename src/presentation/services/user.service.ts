@@ -3,19 +3,34 @@ import bcrypt from 'bcryptjs';
 import { CreateUserDto, UpdateUserDto } from '../../domain/dtos/user.dto';
 
 export class UserService {
+    private static async ensureAssignableRole(roleId: number) {
+        const role = await prisma.role.findUnique({
+            where: { id: roleId },
+            select: { id: true, isActive: true }
+        });
+
+        if (!role) {
+            throw new Error('El rol seleccionado no existe');
+        }
+
+        if (!role.isActive) {
+            throw new Error('No se puede asignar un rol inactivo');
+        }
+    }
+
     static async create(createUserDto: CreateUserDto) {
         const { firstName, lastName, email, password, roleId, isActive } = createUserDto;
 
-        // Check if email already exists
         const existingUser = await prisma.user.findUnique({
             where: { email }
         });
 
         if (existingUser) {
-            throw new Error('El correo electrónico ya está registrado');
+            throw new Error('El correo electronico ya esta registrado');
         }
 
-        // Hash password
+        await this.ensureAssignableRole(roleId);
+
         const hashedPassword = await bcrypt.hash(password, 10);
 
         const user = await prisma.user.create({
@@ -28,11 +43,15 @@ export class UserService {
                 isActive
             },
             include: {
-                role: true
+                role: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                }
             }
         });
 
-        // Remove password from response
         const { password: _, ...userWithoutPassword } = user;
         return userWithoutPassword;
     }
@@ -40,12 +59,16 @@ export class UserService {
     static async findAll() {
         const users = await prisma.user.findMany({
             include: {
-                role: true
+                role: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                }
             }
         });
 
-        // Remove passwords from response
-        return users.map(user => {
+        return users.map((user) => {
             const { password, ...userWithoutPassword } = user;
             return userWithoutPassword;
         });
@@ -55,7 +78,12 @@ export class UserService {
         const user = await prisma.user.findUnique({
             where: { id },
             include: {
-                role: true
+                role: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                }
             }
         });
 
@@ -63,29 +91,41 @@ export class UserService {
             throw new Error('Usuario no encontrado');
         }
 
-        // Remove password from response
         const { password, ...userWithoutPassword } = user;
         return userWithoutPassword;
     }
 
     static async update(id: number, updateUserDto: UpdateUserDto) {
-        const updateData: any = {};
+        const updateData: {
+            firstName?: string;
+            lastName?: string;
+            email?: string;
+            roleId?: number;
+            isActive?: boolean;
+        } = {};
 
         if (updateUserDto.firstName !== undefined) updateData.firstName = updateUserDto.firstName;
         if (updateUserDto.lastName !== undefined) updateData.lastName = updateUserDto.lastName;
         if (updateUserDto.email !== undefined) updateData.email = updateUserDto.email;
-        if (updateUserDto.roleId !== undefined) updateData.roleId = updateUserDto.roleId;
+        if (updateUserDto.roleId !== undefined) {
+            await this.ensureAssignableRole(updateUserDto.roleId);
+            updateData.roleId = updateUserDto.roleId;
+        }
         if (updateUserDto.isActive !== undefined) updateData.isActive = updateUserDto.isActive;
 
         const user = await prisma.user.update({
             where: { id },
             data: updateData,
             include: {
-                role: true
+                role: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                }
             }
         });
 
-        // Remove password from response
         const { password, ...userWithoutPassword } = user;
         return userWithoutPassword;
     }
@@ -105,6 +145,6 @@ export class UserService {
             data: { password: hashedPassword }
         });
 
-        return { message: 'Contraseña actualizada exitosamente' };
+        return { message: 'Contrasena actualizada exitosamente' };
     }
 }

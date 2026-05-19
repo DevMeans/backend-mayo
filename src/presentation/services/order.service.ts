@@ -110,6 +110,7 @@ export class OrderService {
     private readonly orderDetailInclude = {
         items: {
             include: { variant: { include: { product: true, color: true, size: true } } },
+            orderBy: { id: 'asc' as const },
         },
         sourceStore: true,
         fulfillmentStore: true,
@@ -120,6 +121,7 @@ export class OrderService {
             include: {
                 assignedUser: true,
                 items: {
+                    orderBy: { id: 'asc' as const },
                     include: {
                         variant: {
                             include: {
@@ -767,26 +769,28 @@ export class OrderService {
         const pickingSession = order?.pickingSession || null;
         const sessionItems = pickingSession?.items || [];
 
-        const items = (order?.items || []).map((item: any) => {
-            const sessionItem = sessionItems.find((candidate: any) => Number(candidate.variantId) === Number(item.variantId));
-            const pickedQuantity = Number(sessionItem?.pickedQuantity ?? item?.picked ?? 0);
-            const requestedQuantity = Number(item?.quantity || 0);
-            const missingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
-            const itemStatus = this.mapPickingItemStatus(pickedQuantity, requestedQuantity);
+        const items = (order?.items || [])
+            .map((item: any) => {
+                const sessionItem = sessionItems.find((candidate: any) => Number(candidate.variantId) === Number(item.variantId));
+                const pickedQuantity = Number(sessionItem?.pickedQuantity ?? item?.picked ?? 0);
+                const requestedQuantity = Number(item?.quantity || 0);
+                const missingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
+                const itemStatus = this.mapPickingItemStatus(pickedQuantity, requestedQuantity);
 
-            return {
-                pickingItemId: sessionItem?.id ?? null,
-                orderItemId: item.id,
-                variantId: item.variantId,
-                requestedQuantity,
-                pickedQuantity,
-                missingQuantity,
-                status: itemStatus,
-                variant: item.variant,
-                responsibleUser: pickingSession?.assignedUser || null,
-                updatedAt: sessionItem?.createdAt || pickingSession?.updatedAt || order.updatedAt,
-            };
-        });
+                return {
+                    pickingItemId: sessionItem?.id ?? null,
+                    orderItemId: item.id,
+                    variantId: item.variantId,
+                    requestedQuantity,
+                    pickedQuantity,
+                    missingQuantity,
+                    status: itemStatus,
+                    variant: item.variant,
+                    responsibleUser: pickingSession?.assignedUser || null,
+                    updatedAt: sessionItem?.createdAt || pickingSession?.updatedAt || order.updatedAt,
+                };
+            })
+            .sort((a: any, b: any) => Number(a.orderItemId || 0) - Number(b.orderItemId || 0));
 
         const totalRequested = items.reduce((sum: number, item: any) => sum + item.requestedQuantity, 0);
         const totalPicked = items.reduce((sum: number, item: any) => sum + item.pickedQuantity, 0);

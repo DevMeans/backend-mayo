@@ -1,19 +1,46 @@
 import { prisma } from './prisma';
 import bcrypt from 'bcryptjs';
+import { PermissionService } from '../presentation/services/permission.service';
 
 async function main() {
-    // Create roles
-    const adminRole = await prisma.role.upsert({
-        where: { name: 'ADMIN' },
-        update: {},
-        create: { name: 'ADMIN' }
-    });
+    const roleDefinitions: Array<{ name: string; description: string }> = [
+        { name: 'ADMIN', description: 'Acceso total al sistema' },
+        { name: 'MANAGER', description: 'Gestion operativa del negocio' },
+        { name: 'SELLER', description: 'Operacion de ventas y POS' },
+        { name: 'WAREHOUSE', description: 'Operacion de inventario y transferencias' },
+        { name: 'PICKER', description: 'Operacion de picking y preparacion de pedidos' },
+        { name: 'USER', description: 'Acceso basico de consulta' }
+    ];
 
-    const userRole = await prisma.role.upsert({
-        where: { name: 'USER' },
-        update: {},
-        create: { name: 'USER' }
-    });
+    const roleByName = new Map<string, { id: number; name: string }>();
+
+    for (const definition of roleDefinitions) {
+        const role = await prisma.role.upsert({
+            where: { name: definition.name },
+            update: {
+                description: definition.description,
+                isActive: true
+            },
+            create: {
+                name: definition.name,
+                description: definition.description,
+                isActive: true
+            }
+        });
+
+        roleByName.set(role.name, { id: role.id, name: role.name });
+    }
+
+    await PermissionService.seedDefaultPermissionsForRoles(
+        new Map(Array.from(roleByName.values()).map((role) => [role.id, role.name]))
+    );
+
+    const adminRole = roleByName.get('ADMIN');
+    const userRole = roleByName.get('USER');
+
+    if (!adminRole || !userRole) {
+        throw new Error('No se pudieron cargar roles base para el seed');
+    }
 
     // Hash password
     const hashedPassword = await bcrypt.hash('password123', 10);

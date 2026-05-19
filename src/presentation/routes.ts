@@ -3,6 +3,7 @@ import { AuthRouter } from "./auth/router";
 import { UserRouter } from "./auth/user.router";
 import { RoleRouter } from "./auth/role.router";
 import { AuthMiddleware } from "./auth/middleware";
+import { RoleController } from "./auth/role.controller";
 import { categoryRoute } from "./category/router";
 import { colorRoute } from "./color/router";
 import { sizeRoute } from "./size/router";
@@ -18,6 +19,7 @@ export class AppRouter{
         router.use('/api/auth', AuthRouter.router);
         router.use('/api/users', UserRouter.router);
         router.use('/api/roles', RoleRouter.router);
+        router.get('/api/permissions', AuthMiddleware.validateJWT, AuthMiddleware.requirePermission('roles.permissions'), RoleController.listPermissions);
 
         // Rutas protegidas - requieren autenticación
         router.use('/api/categorie', AuthMiddleware.validateJWT, categoryRoute.router);
