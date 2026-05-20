@@ -146,6 +146,11 @@ enum ReservationStatus {
   COMPLETED
 }
 
+enum ReturnResponsibilityStatus {
+  PENDING
+  ACCEPTED
+}
+
 enum PickingStatus {
   PENDING
   IN_PROGRESS
@@ -224,6 +229,9 @@ model User {
   sellerOrders Order[] @relation("OrderSeller")
   pickerOrders Order[] @relation("OrderPicker")
   dispenserOrders Order[] @relation("OrderDispenser")
+  cancelledOrders Order[] @relation("OrderCancelledBy")
+  returnResponsibleOrders Order[] @relation("OrderReturnResponsible")
+  delegatedReturnOrders Order[] @relation("OrderReturnDelegatedBy")
 }
 
 enum StoreType {
@@ -416,6 +424,7 @@ enum OrderStatus {
   PREPARING
   READY
   DELIVERED
+  RETURN_PENDING
   CANCELLED
   WAITING_STOCK
 }
@@ -462,6 +471,20 @@ model Order {
 
   dispenserUserId Int?
   dispenserUser User? @relation("OrderDispenser", fields: [dispenserUserId], references: [id])
+
+  cancelledByUserId Int?
+  cancelledByUser User? @relation("OrderCancelledBy", fields: [cancelledByUserId], references: [id])
+
+  returnResponsibleUserId Int?
+  returnResponsibleUser User? @relation("OrderReturnResponsible", fields: [returnResponsibleUserId], references: [id])
+
+  returnResponsibilityDelegatedById Int?
+  returnResponsibilityDelegatedBy User? @relation("OrderReturnDelegatedBy", fields: [returnResponsibilityDelegatedById], references: [id])
+
+  returnResponsibilityStatus ReturnResponsibilityStatus?
+  returnRequestedAt DateTime?
+  returnResponsibilityAcceptedAt DateTime?
+  returnedAt DateTime?
 
   // RELATIONS
   items OrderItem[]

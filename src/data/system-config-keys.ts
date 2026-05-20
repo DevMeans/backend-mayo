@@ -1,0 +1,4 @@
+export const RETURN_RESPONSIBILITY_MANAGEMENT_KEY = 'return_responsibility_management_enabled';
+export const MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY = 'marketplace_payment_methods_enabled';
+export const MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY = 'marketplace_allowed_payment_method_ids';
+

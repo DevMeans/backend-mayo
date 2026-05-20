@@ -4,6 +4,7 @@ type UpdateVariantInput = {
     colorId?: number;
     sizeId?: number;
     price: number;
+    isActive?: boolean;
     imageUrl?: string;
     imageFile?: { filename: string; data: string };
 };
@@ -135,6 +136,10 @@ export class UpdateProductDto {
 
                 if (!variant.price || typeof variant.price !== 'number' || variant.price <= 0) {
                     return ['Cada variante debe tener un precio mayor a 0', undefined];
+                }
+
+                if (variant.isActive !== undefined && typeof variant.isActive !== 'boolean') {
+                    return ['isActive de la variante debe ser booleano', undefined];
                 }
 
                 if (variant.imageUrl !== undefined && typeof variant.imageUrl !== 'string') {

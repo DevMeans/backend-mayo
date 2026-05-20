@@ -5,6 +5,7 @@ import { UpdateOrderStatusDto } from '../../domain/dtos/update-order-status.dto'
 import { ListOrderDto } from '../../domain/dtos/list-order.dto';
 import { AssignOrderResponsibleDto } from '../../domain/dtos/assign-order-responsible.dto';
 import { UpdateOrderPickingDto } from '../../domain/dtos/update-order-picking.dto';
+import { DelegateOrderReturnDto } from '../../domain/dtos/delegate-order-return.dto';
 import { CustomError } from '../../domain/errors/custom.error';
 import { AuthRequest } from '../auth/middleware';
 
@@ -232,6 +233,63 @@ export class OrderController {
             res.status(200).json({
                 success: true,
                 data: reservations,
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Delegar responsabilidad de devolucion
+     * PATCH /api/orders/:id/return-responsibility/delegate
+     */
+    delegateReturnResponsibility = async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+        const [error, dto] = DelegateOrderReturnDto.create(req.body);
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        if (error) {
+            return res.status(400).json({ error });
+        }
+
+        try {
+            const order = await this.orderService.delegateReturnResponsibility(Number(id), dto!, req.user?.id);
+            res.status(200).json({
+                success: true,
+                data: order,
+                message: 'Responsabilidad de devolucion delegada exitosamente',
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
+     * Aceptar responsabilidad de devolucion
+     * PATCH /api/orders/:id/return-responsibility/accept
+     */
+    acceptReturnResponsibility = async (req: AuthRequest, res: Response) => {
+        const { id } = req.params;
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        try {
+            const order = await this.orderService.acceptReturnResponsibility(Number(id), req.user?.id);
+            res.status(200).json({
+                success: true,
+                data: order,
+                message: 'Responsabilidad de devolucion aceptada',
             });
         } catch (error) {
             if (error instanceof CustomError) {

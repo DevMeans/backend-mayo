@@ -304,6 +304,7 @@ export class ProductService {
                 colorId: number;
                 sizeId: number;
                 price: number;
+                isActive?: boolean;
                 imageUrl?: string;
                 imageFile?: { filename: string; data: string };
             }> = [];
@@ -323,12 +324,14 @@ export class ProductService {
                     colorId: number;
                     sizeId: number;
                     price: number;
+                    isActive?: boolean;
                     imageUrl?: string;
                     imageFile?: { filename: string; data: string };
                 } = {
                     colorId: simpleDimensions.colorId,
                     sizeId: simpleDimensions.sizeId,
                     price: Number(baseVariant.price),
+                    isActive: baseVariant.isActive !== false,
                 };
 
                 if (baseVariant.imageUrl) {
@@ -354,12 +357,14 @@ export class ProductService {
                         colorId: number;
                         sizeId: number;
                         price: number;
+                        isActive?: boolean;
                         imageUrl?: string;
                         imageFile?: { filename: string; data: string };
                     } = {
                         colorId: simpleColor.id,
                         sizeId: Number(variant.sizeId),
                         price: Number(variant.price),
+                        isActive: variant.isActive !== false,
                     };
 
                     if (variant.imageUrl) {
@@ -388,12 +393,14 @@ export class ProductService {
                         colorId: number;
                         sizeId: number;
                         price: number;
+                        isActive?: boolean;
                         imageUrl?: string;
                         imageFile?: { filename: string; data: string };
                     } = {
                         colorId: Number(variant.colorId),
                         sizeId: Number(variant.sizeId),
                         price: Number(variant.price),
+                        isActive: variant.isActive !== false,
                     };
 
                     if (variant.imageUrl) {
@@ -455,7 +462,7 @@ export class ProductService {
                             sizeId: variant.sizeId,
                             imageUrl: imageUrl || null,
                             productId: product.id,
-                            isActive: true,
+                            isActive: variant.isActive !== false,
                             updatedAt: now,
                         },
                     });
@@ -541,6 +548,7 @@ export class ProductService {
                 include: {
                     category: true,
                     variants: {
+                        where: { isActive: true },
                         include: {
                             color: true,
                             size: true,
@@ -593,6 +601,7 @@ export class ProductService {
                 include: {
                     category: true,
                     variants: {
+                        where: { isActive: true },
                         include: {
                             color: true,
                             size: true,
@@ -932,32 +941,26 @@ export class ProductService {
     /**
      * Reemplazar las variantes de un producto
      */
-    private async replaceVariants(productId: number, productName: string, variants: Array<{ colorId: number; sizeId: number; price: number; imageUrl?: string; imageFile?: { filename: string; data: string } }>) {
+    private async replaceVariants(productId: number, productName: string, variants: Array<{ colorId: number; sizeId: number; price: number; isActive?: boolean; imageUrl?: string; imageFile?: { filename: string; data: string } }>) {
         const existingVariants = await prisma.productVariant.findMany({
             where: { productId },
-            select: { colorId: true, sizeId: true, imageUrl: true },
+            select: { id: true, colorId: true, sizeId: true, imageUrl: true, isActive: true },
         });
 
-        const incomingMap = new Map(variants.map((variant) => ([`${variant.colorId}-${variant.sizeId}`, variant])));
+        const incomingMap = new Map<string, { colorId: number; sizeId: number; price: number; isActive?: boolean; imageUrl?: string; imageFile?: { filename: string; data: string } }>();
+        for (const variant of variants) {
+            const key = `${variant.colorId}-${variant.sizeId}`;
+            if (incomingMap.has(key)) {
+                throw CustomError.badRequest(`Variante duplicada para colorId=${variant.colorId} y sizeId=${variant.sizeId}`);
+            }
+            incomingMap.set(key, variant);
+        }
 
-        const removedVariantImages = existingVariants
-            .filter((existing) => {
-                const key = `${existing.colorId}-${existing.sizeId}`;
-                const incoming = incomingMap.get(key);
-                if (!incoming) {
-                    return !!existing.imageUrl;
-                }
-                return !!existing.imageUrl && incoming.imageFile !== undefined && existing.imageUrl !== incoming.imageUrl;
-            })
-            .map((existing) => existing.imageUrl)
-            .filter((url): url is string => !!url);
+        const existingByKey = new Map(existingVariants.map((variant) => [`${variant.colorId}-${variant.sizeId}`, variant]));
+        const removedVariantImages: string[] = [];
 
-        await Promise.all(removedVariantImages.map((url) => this.deleteCloudinaryUrl(url)));
-
-        await prisma.productVariant.deleteMany({ where: { productId } });
-
-        const colorIds = variants.map((variant) => variant.colorId);
-        const sizeIds = variants.map((variant) => variant.sizeId);
+        const colorIds = [...new Set(variants.map((variant) => variant.colorId))];
+        const sizeIds = [...new Set(variants.map((variant) => variant.sizeId))];
         const colorRecords = await prisma.color.findMany({ where: { id: { in: colorIds } } });
         const sizeRecords = await prisma.size.findMany({ where: { id: { in: sizeIds } } });
         const colorById = new Map(colorRecords.map(color => [color.id, color.name]));
@@ -965,43 +968,97 @@ export class ProductService {
 
         const now = new Date();
 
-        return Promise.all(
+        const savedVariants = await Promise.all(
             variants.map(async variant => {
-                const imageUrl = await this.uploadVariantImage(productId, variant);
+                const key = `${variant.colorId}-${variant.sizeId}`;
+                const existing = existingByKey.get(key);
+                const uploadedImage = await this.uploadVariantImage(productId, variant);
                 const colorName = colorById.get(variant.colorId) ?? '';
                 const sizeName = sizeById.get(variant.sizeId) ?? '';
+                const shouldBeActive = variant.isActive !== false;
+
+                let imageUrlToPersist: string | null = null;
+                if (variant.imageFile) {
+                    imageUrlToPersist = uploadedImage;
+                } else if (variant.imageUrl !== undefined) {
+                    imageUrlToPersist = variant.imageUrl || null;
+                } else if (existing?.imageUrl) {
+                    imageUrlToPersist = existing.imageUrl;
+                }
+
+                if (
+                    existing?.imageUrl &&
+                    imageUrlToPersist &&
+                    existing.imageUrl !== imageUrlToPersist &&
+                    (variant.imageFile !== undefined || variant.imageUrl !== undefined)
+                ) {
+                    removedVariantImages.push(existing.imageUrl);
+                }
+
+                const variantData = {
+                    sku: this.generateSKU(productName, colorName, sizeName, productId, variant.colorId, variant.sizeId),
+                    price: new Prisma.Decimal(String(variant.price)),
+                    colorId: variant.colorId,
+                    sizeId: variant.sizeId,
+                    imageUrl: imageUrlToPersist,
+                    isActive: shouldBeActive,
+                    updatedAt: now,
+                };
+
+                if (existing) {
+                    return prisma.productVariant.update({
+                        where: { id: existing.id },
+                        data: variantData,
+                    });
+                }
+
                 return prisma.productVariant.create({
                     data: {
-                        sku: this.generateSKU(productName, colorName, sizeName, productId, variant.colorId, variant.sizeId),
-                        price: new Prisma.Decimal(String(variant.price)),
-                        colorId: variant.colorId,
-                        sizeId: variant.sizeId,
-                        imageUrl: imageUrl || null,
+                        ...variantData,
                         productId,
-                        isActive: true,
-                        updatedAt: now,
                     },
                 });
             }),
         );
+
+        const variantsToDeactivate = existingVariants
+            .filter((existing) => !incomingMap.has(`${existing.colorId}-${existing.sizeId}`) && existing.isActive)
+            .map((existing) => existing.id);
+
+        if (variantsToDeactivate.length > 0) {
+            await prisma.productVariant.updateMany({
+                where: { id: { in: variantsToDeactivate } },
+                data: {
+                    isActive: false,
+                    updatedAt: now,
+                },
+            });
+        }
+
+        const uniqueRemovedImages = [...new Set(removedVariantImages)];
+        await Promise.all(uniqueRemovedImages.map((url) => this.deleteCloudinaryUrl(url)));
+
+        return savedVariants;
     }
 
     private async replaceSimpleVariant(
         productId: number,
         productName: string,
-        variant: { price: number; imageUrl?: string; imageFile?: { filename: string; data: string } },
+        variant: { price: number; isActive?: boolean; imageUrl?: string; imageFile?: { filename: string; data: string } },
     ) {
         const simpleDimensions = await this.ensureSimpleVariantDimensions();
         const simpleVariant: {
             colorId: number;
             sizeId: number;
             price: number;
+            isActive?: boolean;
             imageUrl?: string;
             imageFile?: { filename: string; data: string };
         } = {
             colorId: simpleDimensions.colorId,
             sizeId: simpleDimensions.sizeId,
             price: Number(variant.price),
+            isActive: variant.isActive !== false,
         };
 
         if (variant.imageUrl) {
@@ -1018,7 +1075,7 @@ export class ProductService {
     private async replaceSizeOnlyVariants(
         productId: number,
         productName: string,
-        variants: Array<{ sizeId?: number; price: number; imageUrl?: string; imageFile?: { filename: string; data: string } }>,
+        variants: Array<{ sizeId?: number; price: number; isActive?: boolean; imageUrl?: string; imageFile?: { filename: string; data: string } }>,
     ) {
         const simpleColor = await this.ensureSimpleColor();
         const normalizedSizeIds = [...new Set(variants.map((variant) => Number(variant.sizeId || 0)).filter((id) => id > 0))];
@@ -1029,12 +1086,14 @@ export class ProductService {
                 colorId: number;
                 sizeId: number;
                 price: number;
+                isActive?: boolean;
                 imageUrl?: string;
                 imageFile?: { filename: string; data: string };
             } = {
                 colorId: simpleColor.id,
                 sizeId: Number(variant.sizeId),
                 price: Number(variant.price),
+                isActive: variant.isActive !== false,
             };
 
             if (variant.imageUrl) {
@@ -1104,12 +1163,14 @@ export class ProductService {
                                 colorId: number;
                                 sizeId: number;
                                 price: number;
+                                isActive?: boolean;
                                 imageUrl?: string;
                                 imageFile?: { filename: string; data: string };
                             } = {
                                 colorId: Number(variant.colorId),
                                 sizeId: Number(variant.sizeId),
                                 price: Number(variant.price),
+                                isActive: variant.isActive !== false,
                             };
 
                             if (variant.imageUrl) {

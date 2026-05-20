@@ -47,6 +47,12 @@ export class orderRoute {
         // Asignar responsable
         router.patch('/:id/assign', controller.assignResponsible);
 
+        // Delegar responsabilidad de devolucion
+        router.patch('/:id/return-responsibility/delegate', controller.delegateReturnResponsibility);
+
+        // Aceptar responsabilidad de devolucion
+        router.patch('/:id/return-responsibility/accept', controller.acceptReturnResponsibility);
+
         // Reservar stock remoto
         router.post('/:id/reserve-remote', controller.reserveRemoteStock);
 

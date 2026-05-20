@@ -12,6 +12,7 @@ export class CreateMarketplaceOrderDto {
         public readonly pickupStoreId: number | undefined,
         public readonly deliveryAddress: string | undefined,
         public readonly deliveryReference: string | undefined,
+        public readonly paymentMethodId: number | undefined,
         public readonly note: string | undefined,
         public readonly items: Array<{
             variantId: number;
@@ -34,6 +35,9 @@ export class CreateMarketplaceOrderDto {
             : undefined;
         const deliveryAddress = typeof payload.deliveryAddress === 'string' ? payload.deliveryAddress.trim() : undefined;
         const deliveryReference = typeof payload.deliveryReference === 'string' ? payload.deliveryReference.trim() : undefined;
+        const paymentMethodId = payload.paymentMethodId !== undefined && payload.paymentMethodId !== null
+            ? Number(payload.paymentMethodId)
+            : undefined;
         const note = typeof payload.note === 'string' ? payload.note.trim() : undefined;
         const items = Array.isArray(payload.items) ? payload.items : [];
 
@@ -59,6 +63,9 @@ export class CreateMarketplaceOrderDto {
 
         if (deliveryType === 'PICKUP' && pickupStoreId !== undefined && (!Number.isInteger(pickupStoreId) || pickupStoreId < 1)) {
             return ['La tienda de recojo no es valida', undefined];
+        }
+        if (paymentMethodId !== undefined && (!Number.isInteger(paymentMethodId) || paymentMethodId < 1)) {
+            return ['El metodo de pago no es valido', undefined];
         }
 
         if (items.length === 0) {
@@ -106,6 +113,7 @@ export class CreateMarketplaceOrderDto {
                 pickupStoreId,
                 deliveryAddress,
                 deliveryReference,
+                paymentMethodId,
                 note,
                 normalizedItems,
             ),

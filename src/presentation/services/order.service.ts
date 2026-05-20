@@ -1,4 +1,5 @@
 import { prisma } from "../../data/prisma";
+import { Prisma } from "@prisma/client";
 import { CustomError } from "../../domain/errors/custom.error";
 import { CreateOrderDto } from "../../domain/dtos/create-order.dto";
 import { UpdateOrderStatusDto, OrderStatusEnum } from "../../domain/dtos/update-order-status.dto";
@@ -7,9 +8,38 @@ import { AssignOrderResponsibleDto } from "../../domain/dtos/assign-order-respon
 import { UpdateOrderPickingDto } from "../../domain/dtos/update-order-picking.dto";
 import { CreateMarketplaceOrderDto } from "../../domain/dtos/create-marketplace-order.dto";
 import { TrackMarketplaceOrderDto } from "../../domain/dtos/track-marketplace-order.dto";
+import { DelegateOrderReturnDto } from "../../domain/dtos/delegate-order-return.dto";
+import { ListMarketplaceOrdersDto } from "../../domain/dtos/list-marketplace-orders.dto";
+import {
+    MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
+    MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
+    RETURN_RESPONSIBILITY_MANAGEMENT_KEY,
+} from "../../data/system-config-keys";
+
+type MarketplacePaymentMethod = {
+    id: number;
+    name: string;
+    code: string;
+    displayOrder: number;
+    isActive: boolean;
+};
+
+type MarketplacePaymentSettings = {
+    enabled: boolean;
+    allowedPaymentMethodIds: number[];
+};
 
 export class OrderService {
     constructor() {}
+
+    private buildMarketplaceOrderScopeWhere() {
+        return {
+            OR: [
+                { note: { contains: 'CHANNEL: ECOMMERCE', mode: 'insensitive' as const } },
+                { code: { startsWith: 'MK-' } },
+            ],
+        };
+    }
 
     private resolvePreferredResponsibleUserId(...candidates: Array<number | null | undefined>): number | null {
         for (const candidate of candidates) {
@@ -33,21 +63,164 @@ export class OrderService {
         return 'INTERNAL';
     }
 
-    private mapPublicOrderStatus(status: OrderStatusEnum): 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado' {
-        const map: Record<OrderStatusEnum, 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado'> = {
+    private parseBooleanSetting(rawValue: string | null | undefined, fallback: boolean): boolean {
+        const normalized = String(rawValue || '').trim().toLowerCase();
+        if (!normalized) return fallback;
+        if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true;
+        if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false;
+        return fallback;
+    }
+
+    private parseNumberArraySetting(rawValue: string | null | undefined): number[] {
+        if (!rawValue) return [];
+
+        try {
+            const parsed = JSON.parse(rawValue);
+            if (Array.isArray(parsed)) {
+                return this.normalizePositiveIds(parsed);
+            }
+        } catch {
+            // fallback CSV mode
+        }
+
+        return this.normalizePositiveIds(String(rawValue).split(','));
+    }
+
+    private normalizePositiveIds(values: unknown[]): number[] {
+        const unique = new Set<number>();
+        for (const value of values) {
+            const parsed = Number(value);
+            if (Number.isInteger(parsed) && parsed > 0) {
+                unique.add(parsed);
+            }
+        }
+        return Array.from(unique.values());
+    }
+
+    private async getSystemSettingValue(key: string, dbClient: any = prisma): Promise<string | null> {
+        const rowsRaw = await dbClient.$queryRaw(
+            Prisma.sql`SELECT "value" FROM "SystemSetting" WHERE "key" = ${key} LIMIT 1`,
+        );
+        const rows = rowsRaw as Array<{ value: string }>;
+        return rows?.[0]?.value ?? null;
+    }
+
+    private async isReturnResponsibilityManagementEnabled(dbClient: any = prisma): Promise<boolean> {
+        try {
+            const setting = await this.getSystemSettingValue(RETURN_RESPONSIBILITY_MANAGEMENT_KEY, dbClient);
+            return this.parseBooleanSetting(setting, true);
+        } catch {
+            return true;
+        }
+    }
+
+    private async getMarketplacePaymentSettings(dbClient: any = prisma): Promise<MarketplacePaymentSettings> {
+        const [enabledRaw, allowedIdsRaw] = await Promise.all([
+            this.getSystemSettingValue(MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY, dbClient),
+            this.getSystemSettingValue(MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY, dbClient),
+        ]);
+
+        return {
+            enabled: this.parseBooleanSetting(enabledRaw, false),
+            allowedPaymentMethodIds: this.parseNumberArraySetting(allowedIdsRaw),
+        };
+    }
+
+    private async listActivePaymentMethods(dbClient: any = prisma): Promise<MarketplacePaymentMethod[]> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    "id",
+                    "name",
+                    "code",
+                    "displayOrder",
+                    "isActive"
+                FROM "PaymentMethod"
+                WHERE "isActive" = true
+                ORDER BY "displayOrder" ASC, "name" ASC
+            `,
+        ) as MarketplacePaymentMethod[];
+
+        return rows.map((row) => ({
+            id: Number(row.id),
+            name: String(row.name),
+            code: String(row.code),
+            displayOrder: Number(row.displayOrder || 0),
+            isActive: Boolean(row.isActive),
+        }));
+    }
+
+    private filterAllowedPaymentMethods(methods: MarketplacePaymentMethod[], settings: MarketplacePaymentSettings): MarketplacePaymentMethod[] {
+        if (settings.allowedPaymentMethodIds.length === 0) {
+            return methods;
+        }
+
+        const allowedSet = new Set(settings.allowedPaymentMethodIds);
+        const filtered = methods.filter((method) => allowedSet.has(Number(method.id)));
+
+        return filtered.length > 0 ? filtered : methods;
+    }
+
+    private async resolveMarketplacePaymentMethod(
+        paymentMethodId: number | undefined,
+        dbClient: any = prisma,
+    ): Promise<MarketplacePaymentMethod | null> {
+        const settings = await this.getMarketplacePaymentSettings(dbClient);
+        if (!settings.enabled) {
+            return null;
+        }
+
+        const activeMethods = await this.listActivePaymentMethods(dbClient);
+        const availableMethods = this.filterAllowedPaymentMethods(activeMethods, settings);
+
+        if (availableMethods.length === 0) {
+            throw CustomError.badRequest('No hay metodos de pago disponibles para el marketplace');
+        }
+
+        if (!paymentMethodId) {
+            throw CustomError.badRequest('Selecciona un metodo de pago para continuar');
+        }
+
+        const selectedMethod = availableMethods.find((method) => Number(method.id) === Number(paymentMethodId));
+        if (!selectedMethod) {
+            throw CustomError.badRequest('El metodo de pago seleccionado no esta disponible');
+        }
+
+        return selectedMethod;
+    }
+
+    private mapPublicOrderStatus(status: OrderStatusEnum): 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado pendiente de devolucion' | 'Cancelado' {
+        const map: Record<OrderStatusEnum, 'Pedido recibido' | 'En revision' | 'Esperando stock' | 'Confirmado' | 'En preparacion' | 'Listo para entrega' | 'Entregado' | 'Cancelado pendiente de devolucion' | 'Cancelado'> = {
             [OrderStatusEnum.PENDING]: 'En revision',
             [OrderStatusEnum.CONFIRMED]: 'Confirmado',
             [OrderStatusEnum.WAITING_TRANSFER]: 'Esperando stock',
             [OrderStatusEnum.PREPARING]: 'En preparacion',
             [OrderStatusEnum.READY]: 'Listo para entrega',
             [OrderStatusEnum.DELIVERED]: 'Entregado',
+            [OrderStatusEnum.RETURN_PENDING]: 'Cancelado pendiente de devolucion',
             [OrderStatusEnum.CANCELLED]: 'Cancelado',
             [OrderStatusEnum.WAITING_STOCK]: 'Esperando stock',
         };
         return map[status];
     }
 
-    private buildMarketplaceNote(dto: CreateMarketplaceOrderDto, autoNote?: string): string {
+    private mapSimpleUser(user: any) {
+        if (!user) {
+            return null;
+        }
+
+        return {
+            id: user.id,
+            firstName: user.firstName,
+            lastName: user.lastName,
+        };
+    }
+
+    private buildMarketplaceNote(
+        dto: CreateMarketplaceOrderDto,
+        autoNote?: string,
+        paymentMethod?: MarketplacePaymentMethod | null,
+    ): string {
         const chunks: string[] = ['CHANNEL: ECOMMERCE', 'ORIGIN: MARKETPLACE'];
         chunks.push(`DELIVERY_TYPE: ${dto.deliveryType}`);
 
@@ -59,6 +232,10 @@ export class OrderService {
         }
         if (dto.deliveryType === 'PICKUP' && dto.pickupStoreId) {
             chunks.push(`RECOJO_TIENDA_ID: ${dto.pickupStoreId}`);
+        }
+        if (paymentMethod) {
+            chunks.push(`METODO_PAGO_ID: ${paymentMethod.id}`);
+            chunks.push(`METODO_PAGO: ${paymentMethod.name}`);
         }
         if (dto.note) chunks.push(`NOTA_CLIENTE: ${dto.note}`);
         if (autoNote) chunks.push(autoNote);
@@ -143,6 +320,17 @@ export class OrderService {
                     role: responsibleRole,
                 }
                 : null,
+            returnWorkflow: order.returnRequestedAt || order.returnResponsibleUserId || order.returnResponsibilityStatus
+                ? {
+                    requestedAt: order.returnRequestedAt || null,
+                    returnedAt: order.returnedAt || null,
+                    acceptanceStatus: order.returnResponsibilityStatus || null,
+                    acceptedAt: order.returnResponsibilityAcceptedAt || null,
+                    cancelledBy: this.mapSimpleUser(order.cancelledByUser),
+                    responsible: this.mapSimpleUser(order.returnResponsibleUser),
+                    delegatedBy: this.mapSimpleUser(order.returnResponsibilityDelegatedBy),
+                }
+                : null,
         };
 
         return this.mapOrderWithPickingSummary(baseMappedOrder);
@@ -158,6 +346,9 @@ export class OrderService {
         sellerUser: true,
         pickerUser: true,
         dispenserUser: true,
+        cancelledByUser: true,
+        returnResponsibleUser: true,
+        returnResponsibilityDelegatedBy: true,
         pickingSession: {
             include: {
                 assignedUser: true,
@@ -232,7 +423,12 @@ export class OrderService {
             data: { status: nextPickingStatus },
         });
 
-        if (order.status === OrderStatusEnum.CANCELLED || order.status === OrderStatusEnum.DELIVERED) {
+        const currentStatus = String(order.status || '');
+        if (
+            currentStatus === OrderStatusEnum.CANCELLED ||
+            currentStatus === OrderStatusEnum.DELIVERED ||
+            currentStatus === OrderStatusEnum.RETURN_PENDING
+        ) {
             return;
         }
 
@@ -394,6 +590,8 @@ export class OrderService {
     }
 
     async createMarketplaceOrder(dto: CreateMarketplaceOrderDto) {
+        const selectedPaymentMethod = await this.resolveMarketplacePaymentMethod(dto.paymentMethodId);
+
         const sourceStore = await prisma.store.findFirst({
             where: { id: dto.sourceStoreId, isActive: true },
         });
@@ -517,6 +715,7 @@ export class OrderService {
                         totalPending > 0
                             ? `RESERVA: parcial. Pendiente ${totalPending} unidades`
                             : 'RESERVA: completa',
+                        selectedPaymentMethod,
                     ),
                     items: {
                         create: calculatedItems.map((item) => ({
@@ -594,7 +793,7 @@ export class OrderService {
         const order = await prisma.order.findFirst({
             where: {
                 code,
-                note: { contains: 'CHANNEL: ECOMMERCE', mode: 'insensitive' },
+                ...this.buildMarketplaceOrderScopeWhere(),
             },
             include: this.orderDetailInclude,
         });
@@ -636,7 +835,7 @@ export class OrderService {
             where: {
                 code: dto.code,
                 clientPhone: dto.phone,
-                note: { contains: 'CHANNEL: ECOMMERCE', mode: 'insensitive' },
+                ...this.buildMarketplaceOrderScopeWhere(),
             },
             include: this.orderDetailInclude,
         });
@@ -674,6 +873,109 @@ export class OrderService {
                 ? 'Pedido en revision: hay cantidades pendientes por confirmar'
                 : 'Pedido confirmado para preparacion',
         };
+    }
+
+    async listMarketplaceOrders(dto: ListMarketplaceOrdersDto) {
+        const orders = await prisma.order.findMany({
+            where: {
+                clientPhone: dto.phone,
+                ...(dto.email ? { clientEmail: dto.email } : {}),
+                ...this.buildMarketplaceOrderScopeWhere(),
+            },
+            include: {
+                items: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+            take: dto.take,
+        });
+
+        return this.mapMarketplaceOrderSummaries(orders);
+    }
+
+    async listMarketplaceOrdersByCustomerProfile(customer: { phone: string; email: string }, take: number = 20) {
+        const phone = String(customer.phone || '').trim();
+        const email = String(customer.email || '').trim().toLowerCase();
+
+        if (!phone && !email) {
+            return [];
+        }
+
+        const fallbackOr: Array<any> = [];
+        if (phone) {
+            fallbackOr.push({ clientPhone: phone });
+        }
+        if (email) {
+            fallbackOr.push({ clientEmail: { equals: email, mode: 'insensitive' as const } });
+        }
+
+        if (fallbackOr.length === 0) {
+            return [];
+        }
+
+        const orders = await prisma.order.findMany({
+            where: {
+                AND: [
+                    { OR: fallbackOr },
+                    this.buildMarketplaceOrderScopeWhere(),
+                ],
+            },
+            include: {
+                items: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+            take,
+        });
+
+        return this.mapMarketplaceOrderSummaries(orders);
+    }
+
+    async getMarketplaceCheckoutPaymentMethods() {
+        const settings = await this.getMarketplacePaymentSettings();
+        const activeMethods = await this.listActivePaymentMethods();
+        const availableMethods = settings.enabled
+            ? this.filterAllowedPaymentMethods(activeMethods, settings)
+            : [];
+
+        return {
+            enabled: settings.enabled,
+            methods: availableMethods.map((method) => ({
+                id: method.id,
+                name: method.name,
+                code: method.code,
+            })),
+        };
+    }
+
+    private mapMarketplaceOrderSummaries(orders: Array<any>) {
+        return orders.map((order) => {
+            const totalRequested = (order.items || []).reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
+            const totalReserved = (order.items || []).reduce((sum: number, item: any) => sum + Number(item.reserved || 0), 0);
+            const pendingUnits = Math.max(0, totalRequested - totalReserved);
+            const hasPending = pendingUnits > 0;
+
+            return {
+                code: order.code,
+                status: order.status,
+                publicStatus: this.mapPublicOrderStatus(order.status as OrderStatusEnum),
+                createdAt: order.createdAt,
+                totals: {
+                    subtotal: Number(order.subtotal || 0),
+                    tax: Number(order.tax || 0),
+                    total: Number(order.total || 0),
+                },
+                requestedUnits: totalRequested,
+                reservedUnits: totalReserved,
+                pendingUnits,
+                hasPending,
+                reviewMessage: hasPending
+                    ? 'Pedido en revision: hay cantidades pendientes por confirmar'
+                    : 'Pedido confirmado para preparacion',
+            };
+        });
     }
 
     async listMarketplaceStores() {
@@ -759,6 +1061,7 @@ export class OrderService {
                     { sellerUserId: dto.responsibleUserId },
                     { pickerUserId: dto.responsibleUserId },
                     { dispenserUserId: dto.responsibleUserId },
+                    { returnResponsibleUserId: dto.responsibleUserId },
                 ],
             });
         }
@@ -829,6 +1132,9 @@ export class OrderService {
                 sellerUser: true,
                 pickerUser: true,
                 dispenserUser: true,
+                cancelledByUser: true,
+                returnResponsibleUser: true,
+                returnResponsibilityDelegatedBy: true,
                 pickingSession: {
                     include: {
                         assignedUser: true,
@@ -859,7 +1165,7 @@ export class OrderService {
      * Actualizar estado del pedido
      */
     async updateOrderStatus(orderId: number, dto: UpdateOrderStatusDto, responsibleUserId?: number) {
-        const order = await prisma.order.findUnique({
+        const order: any = await prisma.order.findUnique({
             where: { id: orderId },
             include: {
                 items: true,
@@ -871,26 +1177,43 @@ export class OrderService {
             throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
         }
 
+        const currentStatus = order.status as OrderStatusEnum;
+        const targetStatus = dto.status as OrderStatusEnum;
+
         // Validar transicion de estados
         const validTransitions: Record<OrderStatusEnum, OrderStatusEnum[]> = {
-            [OrderStatusEnum.PENDING]: [OrderStatusEnum.CONFIRMED, OrderStatusEnum.WAITING_STOCK, OrderStatusEnum.CANCELLED],
-            [OrderStatusEnum.CONFIRMED]: [OrderStatusEnum.PREPARING, OrderStatusEnum.WAITING_TRANSFER, OrderStatusEnum.CANCELLED],
-            [OrderStatusEnum.WAITING_STOCK]: [OrderStatusEnum.CONFIRMED, OrderStatusEnum.CANCELLED],
-            [OrderStatusEnum.WAITING_TRANSFER]: [OrderStatusEnum.PREPARING, OrderStatusEnum.CANCELLED],
-            [OrderStatusEnum.PREPARING]: [OrderStatusEnum.READY, OrderStatusEnum.CANCELLED],
-            [OrderStatusEnum.READY]: [OrderStatusEnum.DELIVERED, OrderStatusEnum.CANCELLED],
+            [OrderStatusEnum.PENDING]: [OrderStatusEnum.CONFIRMED, OrderStatusEnum.WAITING_STOCK, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
+            [OrderStatusEnum.CONFIRMED]: [OrderStatusEnum.PREPARING, OrderStatusEnum.WAITING_TRANSFER, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
+            [OrderStatusEnum.WAITING_STOCK]: [OrderStatusEnum.CONFIRMED, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
+            [OrderStatusEnum.WAITING_TRANSFER]: [OrderStatusEnum.PREPARING, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
+            [OrderStatusEnum.PREPARING]: [OrderStatusEnum.READY, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
+            [OrderStatusEnum.READY]: [OrderStatusEnum.DELIVERED, OrderStatusEnum.CANCELLED, OrderStatusEnum.RETURN_PENDING],
             [OrderStatusEnum.DELIVERED]: [],
+            [OrderStatusEnum.RETURN_PENDING]: [OrderStatusEnum.CANCELLED],
             [OrderStatusEnum.CANCELLED]: [],
         };
 
-        if (!validTransitions[order.status as OrderStatusEnum].includes(dto.status as OrderStatusEnum)) {
+        if (!validTransitions[currentStatus].includes(targetStatus)) {
             throw CustomError.badRequest(`No se puede cambiar de ${order.status} a ${dto.status}`);
         }
 
-        await prisma.$transaction(async (tx) => {
-            if (dto.status === OrderStatusEnum.CANCELLED) {
-                const activeReservations = order.reservations.filter((reservation) => reservation.status === 'ACTIVE');
+        const returnResponsibilityManagementEnabled = await this.isReturnResponsibilityManagementEnabled();
 
+        await prisma.$transaction(async (tx) => {
+            const isReturnCompletion = currentStatus === OrderStatusEnum.RETURN_PENDING && targetStatus === OrderStatusEnum.CANCELLED;
+            const isCancellationRequest = (targetStatus === OrderStatusEnum.CANCELLED && currentStatus !== OrderStatusEnum.RETURN_PENDING)
+                || targetStatus === OrderStatusEnum.RETURN_PENDING;
+            const activeReservations = order.reservations.filter((reservation: any) => reservation.status === 'ACTIVE');
+            const totalPickedUnits = order.items.reduce((sum: number, item: any) => {
+                const picked = Number(item?.picked || 0);
+                return sum + Math.max(0, picked);
+            }, 0);
+            const hasPickedUnits = totalPickedUnits > 0;
+
+            let nextOrderStatus = targetStatus;
+            const orderUpdateData: any = { updatedAt: new Date() };
+
+            const releaseActiveReservations = async (actorUserId: number | null, note: string) => {
                 for (const reservation of activeReservations) {
                     const previousStock = Number(reservation.inventory.stock || 0);
 
@@ -910,13 +1233,28 @@ export class OrderService {
                             quantity: reservation.quantity,
                             previousStock,
                             newStock: previousStock,
-                            note: `Reserva liberada por cancelacion de orden ${order.code}`,
-                            responsibleUserId: responsibleUserId ?? null,
+                            note,
+                            responsibleUserId: actorUserId,
                             inventoryId: reservation.inventoryId,
                             reservationId: reservation.id,
                         },
                     });
                 }
+            };
+
+            if (isCancellationRequest) {
+                const cancelledById = this.resolvePreferredResponsibleUserId(
+                    responsibleUserId,
+                    order.dispenserUserId,
+                    order.pickerUserId,
+                    order.sellerUserId,
+                );
+
+                if (!cancelledById) {
+                    throw CustomError.badRequest('No se pudo identificar al usuario que cancela para asignar la devolucion');
+                }
+
+                orderUpdateData.cancelledByUserId = cancelledById;
 
                 await tx.pickingSession.updateMany({
                     where: {
@@ -925,10 +1263,77 @@ export class OrderService {
                     },
                     data: { status: 'CANCELLED' },
                 });
+
+                if (!hasPickedUnits) {
+                    await releaseActiveReservations(
+                        cancelledById,
+                        `Reserva liberada automaticamente por cancelacion sin picking de orden ${order.code}`,
+                    );
+
+                    nextOrderStatus = OrderStatusEnum.CANCELLED;
+                    orderUpdateData.returnResponsibleUserId = null;
+                    orderUpdateData.returnResponsibilityDelegatedById = null;
+                    orderUpdateData.returnResponsibilityStatus = null;
+                    orderUpdateData.returnRequestedAt = null;
+                    orderUpdateData.returnResponsibilityAcceptedAt = null;
+                    orderUpdateData.returnedAt = null;
+                } else {
+                    nextOrderStatus = OrderStatusEnum.RETURN_PENDING;
+                    orderUpdateData.returnResponsibleUserId = returnResponsibilityManagementEnabled ? cancelledById : null;
+                    orderUpdateData.returnResponsibilityDelegatedById = null;
+                    orderUpdateData.returnResponsibilityStatus = returnResponsibilityManagementEnabled ? 'ACCEPTED' : null;
+                    orderUpdateData.returnRequestedAt = new Date();
+                    orderUpdateData.returnResponsibilityAcceptedAt = returnResponsibilityManagementEnabled ? new Date() : null;
+                    orderUpdateData.returnedAt = null;
+                }
             }
 
-            if (dto.status === OrderStatusEnum.DELIVERED) {
-                const activeReservations = order.reservations.filter((reservation) => reservation.status === 'ACTIVE');
+            if (isReturnCompletion) {
+                let actorUserId = this.resolvePreferredResponsibleUserId(responsibleUserId);
+
+                if (returnResponsibilityManagementEnabled) {
+                    const expectedResponsibleUserId = Number(order.returnResponsibleUserId || 0);
+
+                    if (!expectedResponsibleUserId) {
+                        throw CustomError.badRequest('El pedido no tiene responsable de devolucion asignado');
+                    }
+
+                    if (!actorUserId) {
+                        throw CustomError.unauthorized('No se pudo identificar al usuario responsable de la devolucion');
+                    }
+
+                    if (actorUserId !== expectedResponsibleUserId) {
+                        throw CustomError.forbidden('Solo el responsable de devolucion puede cerrar la cancelacion');
+                    }
+
+                    if (order.returnResponsibilityStatus !== 'ACCEPTED') {
+                        throw CustomError.badRequest('La responsabilidad de devolucion debe estar aceptada antes de finalizar');
+                    }
+                } else {
+                    actorUserId = this.resolvePreferredResponsibleUserId(
+                        responsibleUserId,
+                        order.dispenserUserId,
+                        order.pickerUserId,
+                        order.sellerUserId,
+                        order.cancelledByUserId,
+                    );
+                }
+
+                await releaseActiveReservations(actorUserId, `Reserva liberada por devolucion de orden ${order.code}`);
+
+                await tx.pickingSession.updateMany({
+                    where: {
+                        orderId,
+                        status: { in: ['PENDING', 'IN_PROGRESS'] },
+                    },
+                    data: { status: 'CANCELLED' },
+                });
+
+                orderUpdateData.returnedAt = new Date();
+            }
+
+            if (targetStatus === OrderStatusEnum.DELIVERED) {
+                const activeReservations = order.reservations.filter((reservation: any) => reservation.status === 'ACTIVE');
 
                 for (const reservation of activeReservations) {
                     const previousStock = Number(reservation.inventory.stock || 0);
@@ -954,7 +1359,7 @@ export class OrderService {
                             previousStock,
                             newStock,
                             note: `Stock consumido por entrega de orden ${order.code}`,
-                            responsibleUserId: responsibleUserId ?? null,
+                            responsibleUserId: responsibleUserId ?? order.dispenserUserId ?? null,
                             inventoryId: reservation.inventoryId,
                             reservationId: reservation.id,
                         },
@@ -965,14 +1370,20 @@ export class OrderService {
                     where: { orderId },
                     data: { status: 'PICKED' },
                 });
+
+                orderUpdateData.returnRequestedAt = null;
+                orderUpdateData.returnedAt = null;
+                orderUpdateData.returnResponsibleUserId = null;
+                orderUpdateData.returnResponsibilityDelegatedById = null;
+                orderUpdateData.returnResponsibilityStatus = null;
+                orderUpdateData.returnResponsibilityAcceptedAt = null;
             }
+
+            orderUpdateData.status = nextOrderStatus;
 
             await tx.order.update({
                 where: { id: orderId },
-                data: {
-                    status: dto.status,
-                    updatedAt: new Date(),
-                },
+                data: orderUpdateData,
             });
         });
 
@@ -1024,6 +1435,109 @@ export class OrderService {
             }
 
             return order;
+        });
+
+        return this.mapOrderWithPresentationData(updatedOrder);
+    }
+
+    /**
+     * Delegar responsabilidad de devolucion de una orden cancelada
+     */
+    async delegateReturnResponsibility(orderId: number, dto: DelegateOrderReturnDto, delegatedByUserId?: number) {
+        const returnResponsibilityManagementEnabled = await this.isReturnResponsibilityManagementEnabled();
+        if (!returnResponsibilityManagementEnabled) {
+            throw CustomError.badRequest('La gestion de responsabilidades de devolucion esta desactivada en configuracion');
+        }
+
+        const actorId = this.resolvePreferredResponsibleUserId(delegatedByUserId);
+        if (!actorId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que delega la devolucion');
+        }
+
+        const order: any = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+
+        if ((order.status as OrderStatusEnum) !== OrderStatusEnum.RETURN_PENDING) {
+            throw CustomError.badRequest('Solo pedidos en devolucion pendiente permiten delegar responsabilidad');
+        }
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: dto.userId },
+        });
+
+        if (!targetUser) {
+            throw CustomError.badRequest(`El usuario con ID ${dto.userId} no existe`);
+        }
+
+        const canDelegate = actorId === Number(order.returnResponsibleUserId || 0)
+            || actorId === Number(order.cancelledByUserId || 0);
+
+        if (!canDelegate) {
+            throw CustomError.forbidden('Solo quien cancelo o el responsable actual pueden delegar la devolucion');
+        }
+
+        const isSelfAssignment = actorId === dto.userId;
+
+        const updatedOrder = await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                returnResponsibleUserId: dto.userId,
+                returnResponsibilityDelegatedById: actorId,
+                returnResponsibilityStatus: isSelfAssignment ? 'ACCEPTED' : 'PENDING',
+                returnResponsibilityAcceptedAt: isSelfAssignment ? new Date() : null,
+                updatedAt: new Date(),
+            },
+            include: this.orderDetailInclude,
+        });
+
+        return this.mapOrderWithPresentationData(updatedOrder);
+    }
+
+    /**
+     * Aceptar responsabilidad de devolucion
+     */
+    async acceptReturnResponsibility(orderId: number, userId?: number) {
+        const returnResponsibilityManagementEnabled = await this.isReturnResponsibilityManagementEnabled();
+        if (!returnResponsibilityManagementEnabled) {
+            throw CustomError.badRequest('La gestion de responsabilidades de devolucion esta desactivada en configuracion');
+        }
+
+        const actorId = this.resolvePreferredResponsibleUserId(userId);
+        if (!actorId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que acepta la devolucion');
+        }
+
+        const order: any = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+
+        if ((order.status as OrderStatusEnum) !== OrderStatusEnum.RETURN_PENDING) {
+            throw CustomError.badRequest('Solo pedidos en devolucion pendiente permiten aceptar responsabilidad');
+        }
+
+        if (Number(order.returnResponsibleUserId || 0) !== actorId) {
+            throw CustomError.forbidden('Solo el responsable asignado puede aceptar la devolucion');
+        }
+
+        const updatedOrder = await prisma.order.update({
+            where: { id: orderId },
+            data: {
+                returnResponsibilityStatus: 'ACCEPTED',
+                returnResponsibilityAcceptedAt: new Date(),
+                updatedAt: new Date(),
+            },
+            include: this.orderDetailInclude,
         });
 
         return this.mapOrderWithPresentationData(updatedOrder);
