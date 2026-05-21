@@ -16,6 +16,7 @@ export class inventoryRoute {
         router.post('/movements', controller.createMovement);
         router.post('/transfers', controller.createStockTransfer);
         router.post('/reservations', controller.createReservation);
+        router.post('/reconcile-reserved', controller.reconcileReservedStock);
         router.patch('/transfers/:id/receive', controller.receiveStockTransfer);
 
         return router;

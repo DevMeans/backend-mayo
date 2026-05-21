@@ -262,6 +262,28 @@ export class OrderService {
         return 'PARTIAL';
     }
 
+    private getReservedQuantityForVariant(order: any, variantId: number): number {
+        if (!order || !Array.isArray(order.reservations)) {
+            return 0;
+        }
+
+        return order.reservations
+            .filter((reservation: any) =>
+                Number(reservation?.variantId) === Number(variantId) &&
+                (reservation.status === 'ACTIVE' || reservation.status === 'COMPLETED'))
+            .reduce((sum: number, reservation: any) => sum + Math.max(0, Number(reservation.quantity || 0)), 0);
+    }
+
+    private resolveMaxPickableQuantity(order: any, variantId: number, requestedQuantity: number): number {
+        const safeRequested = Math.max(0, Number(requestedQuantity || 0));
+        if (safeRequested <= 0) {
+            return 0;
+        }
+
+        const reservedByVariant = this.getReservedQuantityForVariant(order, variantId);
+        return Math.max(0, Math.min(safeRequested, reservedByVariant));
+    }
+
     private mapOrderWithPickingSummary(order: any) {
         const items = Array.isArray(order?.items) ? order.items : [];
         const totalRequested = items.reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
@@ -279,11 +301,13 @@ export class OrderService {
                 const reservedQuantity = Number(item.reserved || 0);
                 const pendingStockQuantity = Math.max(0, requestedQuantity - reservedQuantity);
                 const pickedQuantity = this.resolvePickedQuantity(item, order);
+                const maxPickableQuantity = this.resolveMaxPickableQuantity(order, item.variantId, requestedQuantity);
                 const pendingPickingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
                 return {
                     ...item,
                     requestedQuantity,
                     reservedQuantity,
+                    maxPickableQuantity,
                     pendingStockQuantity,
                     pickedQuantity,
                     pendingQuantity: pendingPickingQuantity,
@@ -641,7 +665,6 @@ export class OrderService {
                 availableStock: number;
                 unitPrice: number;
                 lineSubtotal: number;
-                inventoryId: number;
             }> = [];
             let subtotal = 0;
             let totalRequested = 0;
@@ -654,26 +677,19 @@ export class OrderService {
                     throw CustomError.badRequest(`Variante ${item.variantId} no encontrada`);
                 }
 
-                const inventory = await tx.inventory.upsert({
+                const inventory = await tx.inventory.findUnique({
                     where: {
                         storeId_variantId: {
                             storeId: dto.sourceStoreId,
                             variantId: item.variantId,
                         },
                     },
-                    create: {
-                        storeId: dto.sourceStoreId,
-                        variantId: item.variantId,
-                        stock: 0,
-                        reservedStock: 0,
-                    },
-                    update: {},
                 });
 
-                const availableStock = Math.max(0, Number(inventory.stock || 0) - Number(inventory.reservedStock || 0));
+                const availableStock = Math.max(0, Number(inventory?.stock || 0) - Number(inventory?.reservedStock || 0));
                 const requestedQuantity = Number(item.quantity || 0);
-                const reservedQuantity = Math.max(0, Math.min(requestedQuantity, availableStock));
-                const pendingQuantity = Math.max(0, requestedQuantity - reservedQuantity);
+                const reservedQuantity = 0;
+                const pendingQuantity = requestedQuantity;
                 const unitPrice = Number(item.unitPrice ?? variant.price ?? 0);
                 const lineSubtotal = requestedQuantity * unitPrice;
 
@@ -690,13 +706,12 @@ export class OrderService {
                     availableStock,
                     unitPrice,
                     lineSubtotal,
-                    inventoryId: inventory.id,
                 });
             }
 
             const tax = subtotal * 0.18;
             const total = subtotal + tax;
-            const status = totalPending > 0 ? OrderStatusEnum.WAITING_STOCK : OrderStatusEnum.CONFIRMED;
+            const status = OrderStatusEnum.PENDING;
 
             const order = await tx.order.create({
                 data: {
@@ -712,22 +727,18 @@ export class OrderService {
                     total,
                     note: this.buildMarketplaceNote(
                         dto,
-                        totalPending > 0
-                            ? `RESERVA: parcial. Pendiente ${totalPending} unidades`
-                            : 'RESERVA: completa',
+                        'RESERVA: no automatica. Pedido pendiente de validacion interna',
                         selectedPaymentMethod,
                     ),
                     items: {
                         create: calculatedItems.map((item) => ({
                             variantId: item.variantId,
                             quantity: item.requestedQuantity,
-                            reserved: item.reservedQuantity,
+                            reserved: 0,
                             picked: 0,
                             unitPrice: item.unitPrice,
                             subtotal: item.lineSubtotal,
-                            status: item.reservedQuantity >= item.requestedQuantity
-                                ? 'PENDING'
-                                : (item.reservedQuantity > 0 ? 'PARTIAL' : 'PENDING'),
+                            status: 'PENDING',
                         })),
                     },
                 },
@@ -737,31 +748,6 @@ export class OrderService {
                     fulfillmentStore: true,
                 },
             });
-
-            for (const item of calculatedItems) {
-                if (item.reservedQuantity <= 0) {
-                    continue;
-                }
-
-                await tx.reservation.create({
-                    data: {
-                        quantity: item.reservedQuantity,
-                        status: 'ACTIVE',
-                        inventoryId: item.inventoryId,
-                        variantId: item.variantId,
-                        orderId: order.id,
-                    },
-                });
-
-                await tx.inventory.update({
-                    where: { id: item.inventoryId },
-                    data: {
-                        reservedStock: {
-                            increment: item.reservedQuantity,
-                        },
-                    },
-                });
-            }
 
             const detailedOrder = await tx.order.findUnique({
                 where: { id: order.id },
@@ -1627,6 +1613,8 @@ export class OrderService {
                 const sessionItem = sessionItems.find((candidate: any) => Number(candidate.variantId) === Number(item.variantId));
                 const pickedQuantity = Number(sessionItem?.pickedQuantity ?? item?.picked ?? 0);
                 const requestedQuantity = Number(item?.quantity || 0);
+                const reservedQuantity = this.getReservedQuantityForVariant(order, item.variantId);
+                const maxPickableQuantity = this.resolveMaxPickableQuantity(order, item.variantId, requestedQuantity);
                 const missingQuantity = Math.max(0, requestedQuantity - pickedQuantity);
                 const itemStatus = this.mapPickingItemStatus(pickedQuantity, requestedQuantity);
 
@@ -1635,6 +1623,8 @@ export class OrderService {
                     orderItemId: item.id,
                     variantId: item.variantId,
                     requestedQuantity,
+                    reservedQuantity,
+                    maxPickableQuantity,
                     pickedQuantity,
                     missingQuantity,
                     status: itemStatus,
@@ -1782,14 +1772,11 @@ export class OrderService {
             throw CustomError.badRequest('La variante del item de picking no pertenece a la orden');
         }
 
-        const reservedByVariant = order.reservations
-            .filter((reservation: any) =>
-                Number(reservation.variantId) === Number(pickingItem.variantId) &&
-                (reservation.status === 'ACTIVE' || reservation.status === 'COMPLETED'))
-            .reduce((sum: number, reservation: any) => sum + Number(reservation.quantity || 0), 0);
+        const maxAllowed = this.resolveMaxPickableQuantity(order, pickingItem.variantId, Number(orderItem.quantity || 0));
+        const currentPickedQuantity = Number(pickingItem.pickedQuantity || 0);
+        const isReducingOverflow = currentPickedQuantity > maxAllowed && pickedQuantity < currentPickedQuantity;
 
-        const maxAllowed = Math.min(Number(orderItem.quantity || 0), reservedByVariant > 0 ? reservedByVariant : Number(orderItem.quantity || 0));
-        if (pickedQuantity > maxAllowed) {
+        if (pickedQuantity > maxAllowed && !isReducingOverflow) {
             throw CustomError.badRequest(`La cantidad separada no puede superar ${maxAllowed}`);
         }
 

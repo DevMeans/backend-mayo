@@ -20,6 +20,26 @@ interface MovementFilter {
     reservationId?: number;
 }
 
+interface ReservationFilter {
+    inventoryId?: number;
+    storeId?: number;
+    variantId?: number;
+    orderId?: number;
+    status?: string[];
+}
+
+interface ReconcileReservedStockResultItem {
+    inventoryId: number;
+    storeId: number;
+    storeName: string;
+    variantId: number;
+    sku: string;
+    previousReservedStock: number;
+    targetReservedStock: number;
+    difference: number;
+    reconciled: boolean;
+}
+
 export class InventoryService {
     constructor() { }
 
@@ -145,8 +165,27 @@ export class InventoryService {
         });
     }
 
-    async listReservations() {
+    async listReservations(filter: ReservationFilter = {}) {
+        const where: any = {};
+
+        if (typeof filter.inventoryId === 'number') {
+            where.inventoryId = filter.inventoryId;
+        }
+        if (typeof filter.variantId === 'number') {
+            where.variantId = filter.variantId;
+        }
+        if (typeof filter.orderId === 'number') {
+            where.orderId = filter.orderId;
+        }
+        if (Array.isArray(filter.status) && filter.status.length > 0) {
+            where.status = { in: filter.status };
+        }
+        if (typeof filter.storeId === 'number') {
+            where.inventory = { storeId: filter.storeId };
+        }
+
         return prisma.reservation.findMany({
+            where,
             include: {
                 inventory: {
                     include: {
@@ -161,6 +200,17 @@ export class InventoryService {
                     },
                 },
                 reservedBy: true,
+                order: {
+                    select: {
+                        id: true,
+                        code: true,
+                        status: true,
+                        createdAt: true,
+                        updatedAt: true,
+                        sourceStoreId: true,
+                        fulfillmentStoreId: true,
+                    },
+                },
             },
             orderBy: { createdAt: 'desc' },
         });
@@ -495,5 +545,116 @@ export class InventoryService {
         });
 
         return result;
+    }
+
+    async reconcileReservedStock(inventoryIds: number[] = [], userId?: number | undefined) {
+        const normalizedIds = Array.from(
+            new Set(
+                (Array.isArray(inventoryIds) ? inventoryIds : [])
+                    .map((value) => Number(value))
+                    .filter((value) => Number.isInteger(value) && value > 0)
+            ).values()
+        );
+
+        const where: any = normalizedIds.length > 0
+            ? { id: { in: normalizedIds } }
+            : {};
+
+        const result = await prisma.$transaction(async (tx) => {
+            const inventories = await tx.inventory.findMany({
+                where,
+                include: {
+                    store: true,
+                    variant: true,
+                },
+                orderBy: { id: 'asc' },
+            });
+
+            if (inventories.length === 0) {
+                return {
+                    adjustedCount: 0,
+                    unchangedCount: 0,
+                    items: [] as ReconcileReservedStockResultItem[],
+                };
+            }
+
+            const groupedReservations = await tx.reservation.groupBy({
+                by: ['inventoryId'],
+                where: {
+                    status: 'ACTIVE',
+                    inventoryId: {
+                        in: inventories.map((inventory) => inventory.id),
+                    },
+                },
+                _sum: {
+                    quantity: true,
+                },
+            });
+
+            const activeReservedByInventory = new Map<number, number>();
+            groupedReservations.forEach((group) => {
+                activeReservedByInventory.set(
+                    Number(group.inventoryId),
+                    Number(group._sum.quantity ?? 0),
+                );
+            });
+
+            const items: ReconcileReservedStockResultItem[] = [];
+            let adjustedCount = 0;
+            let unchangedCount = 0;
+
+            for (const inventory of inventories) {
+                const previousReservedStock = Number(inventory.reservedStock || 0);
+                const targetReservedStock = Number(activeReservedByInventory.get(inventory.id) ?? 0);
+                const difference = targetReservedStock - previousReservedStock;
+                const reconciled = difference !== 0;
+
+                if (reconciled) {
+                    adjustedCount += 1;
+                    await tx.inventory.update({
+                        where: { id: inventory.id },
+                        data: { reservedStock: targetReservedStock },
+                    });
+
+                    await tx.inventoryMovement.create({
+                        data: {
+                            type: difference > 0 ? InventoryMovementType.RESERVED : InventoryMovementType.UNRESERVED,
+                            quantity: Math.abs(difference),
+                            previousStock: inventory.stock,
+                            newStock: inventory.stock,
+                            note: `Reconciliacion automatica de reservados (${previousReservedStock} -> ${targetReservedStock})`,
+                            responsibleUserId: userId ?? null,
+                            inventoryId: inventory.id,
+                        },
+                    });
+                } else {
+                    unchangedCount += 1;
+                }
+
+                items.push({
+                    inventoryId: inventory.id,
+                    storeId: inventory.storeId,
+                    storeName: inventory.store.name,
+                    variantId: inventory.variantId,
+                    sku: inventory.variant.sku,
+                    previousReservedStock,
+                    targetReservedStock,
+                    difference,
+                    reconciled,
+                });
+            }
+
+            return {
+                adjustedCount,
+                unchangedCount,
+                items,
+            };
+        });
+
+        return {
+            ...result,
+            requestedInventoryCount: normalizedIds.length > 0 ? normalizedIds.length : undefined,
+            processedInventoryCount: result.items.length,
+        };
     }
 }

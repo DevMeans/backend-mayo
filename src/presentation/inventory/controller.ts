@@ -67,8 +67,19 @@ export class InventoryController {
     }
 
     listReservations = async (req: Request, res: Response) => {
+        const { inventoryId, storeId, variantId, orderId, status } = req.query;
+
         try {
-            const reservations = await this.inventoryService.listReservations();
+            const filter: any = {};
+            if (inventoryId !== undefined) filter.inventoryId = Number(inventoryId);
+            if (storeId !== undefined) filter.storeId = Number(storeId);
+            if (variantId !== undefined) filter.variantId = Number(variantId);
+            if (orderId !== undefined) filter.orderId = Number(orderId);
+            if (typeof status === 'string') {
+                filter.status = status.split(',').map((item) => item.trim()).filter(Boolean);
+            }
+
+            const reservations = await this.inventoryService.listReservations(filter);
             return res.status(200).json(reservations);
         } catch (error) {
             return this.handleError(error, res);
@@ -144,6 +155,20 @@ export class InventoryController {
             return res.status(201).json(reservation);
         } catch (err) {
             return this.handleError(err, res);
+        }
+    }
+
+    reconcileReservedStock = async (req: AuthRequest, res: Response) => {
+        try {
+            const rawInventoryIds = Array.isArray(req.body?.inventoryIds) ? req.body.inventoryIds : [];
+            const inventoryIds = rawInventoryIds
+                .map((value: unknown) => Number(value))
+                .filter((value: number) => Number.isInteger(value) && value > 0);
+
+            const result = await this.inventoryService.reconcileReservedStock(inventoryIds, req.user?.id);
+            return res.status(200).json(result);
+        } catch (error) {
+            return this.handleError(error, res);
         }
     }
 }
