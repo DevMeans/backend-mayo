@@ -38,6 +38,9 @@ export class orderRoute {
         // Actualizar item de picking
         router.patch('/picking/items/:itemId', controller.updatePickingItem);
 
+        // Actualizar picking por fila de orden (orderItem)
+        router.patch('/:id/picking/order-items/:orderItemId', controller.updatePickingOrderItem);
+
         // Solicitar accion para unpick en item de picking
         router.post('/:id/picking/items/:itemId/unpick-request', controller.requestPickingUnpickAction);
 

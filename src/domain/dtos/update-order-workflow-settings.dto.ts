@@ -5,6 +5,7 @@ export class UpdateOrderWorkflowSettingsDto {
         public readonly marketplacePaymentMethodsEnabled?: boolean,
         public readonly marketplacePaymentMethodIds?: number[],
         public readonly marketplaceIncludeIgv?: boolean,
+        public readonly marketplaceAutoReserveStock?: boolean,
     ) {}
 
     static create(object: { [key: string]: any }): [string | undefined, UpdateOrderWorkflowSettingsDto | undefined] {
@@ -13,6 +14,7 @@ export class UpdateOrderWorkflowSettingsDto {
         const rawMarketplaceFlag = object?.marketplacePaymentMethodsEnabled;
         const rawMarketplaceMethodIds = object?.marketplacePaymentMethodIds;
         const rawMarketplaceIncludeIgv = object?.marketplaceIncludeIgv;
+        const rawMarketplaceAutoReserveStock = object?.marketplaceAutoReserveStock;
 
         let returnResponsibilityManagementEnabled: boolean | undefined;
         if (rawReturnFlag !== undefined) {
@@ -60,12 +62,21 @@ export class UpdateOrderWorkflowSettingsDto {
             marketplaceIncludeIgv = rawMarketplaceIncludeIgv;
         }
 
+        let marketplaceAutoReserveStock: boolean | undefined;
+        if (rawMarketplaceAutoReserveStock !== undefined) {
+            if (typeof rawMarketplaceAutoReserveStock !== 'boolean') {
+                return ['marketplaceAutoReserveStock debe ser booleano', undefined];
+            }
+            marketplaceAutoReserveStock = rawMarketplaceAutoReserveStock;
+        }
+
         if (
             returnResponsibilityManagementEnabled === undefined
             && pickingResponsibilityFlowEnabled === undefined
             && marketplacePaymentMethodsEnabled === undefined
             && marketplacePaymentMethodIds === undefined
             && marketplaceIncludeIgv === undefined
+            && marketplaceAutoReserveStock === undefined
         ) {
             return ['Debes enviar al menos una configuracion para actualizar', undefined];
         }
@@ -78,6 +89,7 @@ export class UpdateOrderWorkflowSettingsDto {
                 marketplacePaymentMethodsEnabled,
                 marketplacePaymentMethodIds,
                 marketplaceIncludeIgv,
+                marketplaceAutoReserveStock,
             ),
         ];
     }

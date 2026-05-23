@@ -11,10 +11,16 @@ import { ProductVariantEntity } from "../../domain/entities/product-variant.enti
 import { ProductImageEntity } from "../../domain/entities/product-image.entity";
 import { cloudinary } from "../../config/cloudinary";
 
+type MarketplaceSimpleVariantConfig = {
+    colorIds: number[];
+    sizeIds: number[];
+};
+
 export class ProductService {
     private readonly simpleColorName = '__SIN_COLOR__';
     private readonly simpleSizeName = '__SIN_TALLA__';
     private readonly simpleColorHex = '#9CA3AF';
+    private readonly marketplaceVariantSettingKeyPrefix = 'marketplace_product_variants_';
 
     constructor() { }
 
@@ -127,6 +133,103 @@ export class ProductService {
         return colorName === this.simpleColorName && sizeName !== this.simpleSizeName;
     }
 
+    private buildMarketplaceVariantSettingKey(productId: number): string {
+        return `${this.marketplaceVariantSettingKeyPrefix}${productId}`;
+    }
+
+    private parseMarketplaceSimpleVariantConfig(raw: string | null | undefined): MarketplaceSimpleVariantConfig | null {
+        if (!raw) return null;
+
+        try {
+            const parsed = JSON.parse(raw) as { colorIds?: unknown; sizeIds?: unknown };
+            const colorIds = Array.isArray(parsed?.colorIds)
+                ? parsed.colorIds
+                    .map((id) => Number(id))
+                    .filter((id) => Number.isInteger(id) && id > 0)
+                : [];
+            const sizeIds = Array.isArray(parsed?.sizeIds)
+                ? parsed.sizeIds
+                    .map((id) => Number(id))
+                    .filter((id) => Number.isInteger(id) && id > 0)
+                : [];
+
+            if (!colorIds.length || !sizeIds.length) {
+                return null;
+            }
+
+            return {
+                colorIds: Array.from(new Set(colorIds)),
+                sizeIds: Array.from(new Set(sizeIds)),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private async getMarketplaceSimpleVariantConfig(productId: number): Promise<MarketplaceSimpleVariantConfig | null> {
+        const key = this.buildMarketplaceVariantSettingKey(productId);
+        const rows = await prisma.$queryRaw<Array<{ value: string }>>(
+            Prisma.sql`SELECT "value" FROM "SystemSetting" WHERE "key" = ${key} LIMIT 1`,
+        );
+        return this.parseMarketplaceSimpleVariantConfig(rows[0]?.value);
+    }
+
+    private async getMarketplaceSimpleVariantConfigs(productIds: number[]): Promise<Map<number, MarketplaceSimpleVariantConfig>> {
+        const uniqueProductIds = Array.from(new Set(productIds.filter((id) => Number.isInteger(id) && id > 0)));
+        const result = new Map<number, MarketplaceSimpleVariantConfig>();
+        if (!uniqueProductIds.length) {
+            return result;
+        }
+
+        const keys = uniqueProductIds.map((productId) => this.buildMarketplaceVariantSettingKey(productId));
+        const rows = await prisma.$queryRaw<Array<{ key: string; value: string }>>(
+            Prisma.sql`
+                SELECT "key", "value"
+                FROM "SystemSetting"
+                WHERE "key" IN (${Prisma.join(keys)})
+            `,
+        );
+
+        for (const row of rows) {
+            const key = String(row?.key || '');
+            if (!key.startsWith(this.marketplaceVariantSettingKeyPrefix)) continue;
+            const rawProductId = Number(key.slice(this.marketplaceVariantSettingKeyPrefix.length));
+            if (!Number.isInteger(rawProductId) || rawProductId < 1) continue;
+
+            const parsed = this.parseMarketplaceSimpleVariantConfig(row?.value);
+            if (parsed) {
+                result.set(rawProductId, parsed);
+            }
+        }
+
+        return result;
+    }
+
+    private async upsertMarketplaceSimpleVariantConfig(productId: number, config: MarketplaceSimpleVariantConfig | null): Promise<void> {
+        const key = this.buildMarketplaceVariantSettingKey(productId);
+        if (!config || !config.colorIds.length || !config.sizeIds.length) {
+            await prisma.$executeRaw(
+                Prisma.sql`DELETE FROM "SystemSetting" WHERE "key" = ${key}`,
+            );
+            return;
+        }
+
+        const payload = JSON.stringify({
+            colorIds: Array.from(new Set(config.colorIds)),
+            sizeIds: Array.from(new Set(config.sizeIds)),
+        });
+
+        await prisma.$executeRaw(
+            Prisma.sql`
+                INSERT INTO "SystemSetting" ("key", "value")
+                VALUES (${key}, ${payload})
+                ON CONFLICT ("key") DO UPDATE
+                SET "value" = EXCLUDED."value",
+                    "updatedAt" = CURRENT_TIMESTAMP
+            `,
+        );
+    }
+
     private mapVariantForResponse(variant: any) {
         const colorName = variant?.color?.name ?? null;
         const sizeName = variant?.size?.name ?? null;
@@ -155,6 +258,56 @@ export class ProductService {
         return allSizeOnly ? 'SIZE_ONLY' : 'MATRIX';
     }
 
+    private buildSyntheticMarketplaceVariantId(baseVariantId: number, colorId: number, sizeId: number): number {
+        return (Number(baseVariantId) * 1_000_000) + (Number(colorId) * 1_000) + Number(sizeId);
+    }
+
+    private buildPublicVariantsForSimpleMode(
+        baseVariant: any,
+        availableStock: number,
+        reservedStock: number,
+        colors: Array<{ id: number; name: string; hex?: string | null }>,
+        sizes: Array<{ id: number; name: string }>,
+    ) {
+        const result: Array<{
+            id: number;
+            sourceVariantId: number;
+            sku: string;
+            barcode?: string | null;
+            price: number;
+            imageUrl?: string | null;
+            color: { id: number; name: string; hex?: string | null } | null;
+            size: { id: number; name: string } | null;
+            availableStock: number;
+            reservedStock: number;
+            isSimpleVariant?: boolean;
+            isSizeOnlyVariant?: boolean;
+            isVirtualMarketplaceVariant?: boolean;
+        }> = [];
+
+        for (const color of colors) {
+            for (const size of sizes) {
+                result.push({
+                    id: this.buildSyntheticMarketplaceVariantId(baseVariant.id, color.id, size.id),
+                    sourceVariantId: Number(baseVariant.id),
+                    sku: `${baseVariant.sku || `VAR-${baseVariant.id}`}-MK-${color.id}-${size.id}`,
+                    barcode: baseVariant.barcode ?? null,
+                    price: Number(baseVariant.price || 0),
+                    imageUrl: baseVariant.imageUrl || null,
+                    color: { id: color.id, name: color.name, hex: color.hex ?? null },
+                    size: { id: size.id, name: size.name },
+                    availableStock: Number(availableStock || 0),
+                    reservedStock: Number(reservedStock || 0),
+                    isSimpleVariant: false,
+                    isSizeOnlyVariant: false,
+                    isVirtualMarketplaceVariant: true,
+                });
+            }
+        }
+
+        return result;
+    }
+
     /**
      * Generar todas las combinaciones posibles de variantes (producto cartesiano)
      */
@@ -169,6 +322,35 @@ export class ProductService {
             }
         }
         return combinations;
+    }
+
+    private async resolveSimpleMarketplaceConfig(
+        variantMode: 'MATRIX' | 'SIMPLE' | 'SIZE_ONLY',
+        colorIds: number[],
+        sizeIds: number[],
+    ): Promise<MarketplaceSimpleVariantConfig | null> {
+        if (variantMode !== 'SIMPLE') {
+            return null;
+        }
+
+        const uniqueColorIds = Array.from(new Set((colorIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+        const uniqueSizeIds = Array.from(new Set((sizeIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+
+        if (uniqueColorIds.length === 0 && uniqueSizeIds.length === 0) {
+            return null;
+        }
+
+        if (uniqueColorIds.length === 0 || uniqueSizeIds.length === 0) {
+            throw CustomError.badRequest('Para variantes marketplace en producto unico debes seleccionar color y talla');
+        }
+
+        await this.validateColors(uniqueColorIds);
+        await this.validateSizes(uniqueSizeIds);
+
+        return {
+            colorIds: uniqueColorIds,
+            sizeIds: uniqueSizeIds,
+        };
     }
 
     private async uploadBase64Image(data: string, publicId: string): Promise<string> {
@@ -300,6 +482,7 @@ export class ProductService {
 
             const isSimpleMode = variantMode === 'SIMPLE';
             const isSizeOnlyMode = variantMode === 'SIZE_ONLY';
+            const simpleMarketplaceConfig = await this.resolveSimpleMarketplaceConfig(variantMode, colorIds, sizeIds);
             let variantsToCreate: Array<{
                 colorId: number;
                 sizeId: number;
@@ -435,6 +618,8 @@ export class ProductService {
                 },
             });
 
+            await this.upsertMarketplaceSimpleVariantConfig(product.id, simpleMarketplaceConfig);
+
             // Subir imágenes de producto a Cloudinary si se recibieron archivos
             const uploadedProductImageUrls = await this.uploadProductFiles(product.id, imageFiles);
             const allImageUrls = [...new Set([...(imageUrls || []), ...uploadedProductImageUrls])];
@@ -475,6 +660,8 @@ export class ProductService {
                     variantCount: createdVariants.length,
                     imageCount: allImageUrls.length,
                     variantMode,
+                    marketplaceVariantColorIds: simpleMarketplaceConfig?.colorIds || [],
+                    marketplaceVariantSizeIds: simpleMarketplaceConfig?.sizeIds || [],
                 },
                 variants: createdVariants.map(v => ProductVariantEntity.fromObject(v)),
                 images: allImageUrls,
@@ -563,16 +750,22 @@ export class ProductService {
 
             // Contar total de productos
             const total = await prisma.product.count({ where });
+            const marketplaceConfigByProductId = await this.getMarketplaceSimpleVariantConfigs(
+                products.map((product) => Number(product.id)),
+            );
 
             // Mapear a entidades
             const mappedProducts = products.map((product: any) => {
                 const mappedVariants = (product.variants || []).map((variant: any) => this.mapVariantForResponse(variant));
+                const marketplaceConfig = marketplaceConfigByProductId.get(Number(product.id));
                 return {
                     ...ProductEntity.fromObject(product),
                     category: product.category,
                     variantCount: mappedVariants.length,
                     imageCount: product.images?.length || 0,
                     variantMode: this.resolveProductVariantMode(product.variants || []),
+                    marketplaceVariantColorIds: marketplaceConfig?.colorIds || [],
+                    marketplaceVariantSizeIds: marketplaceConfig?.sizeIds || [],
                     variants: mappedVariants,
                     images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
                 };
@@ -616,6 +809,7 @@ export class ProductService {
             }
 
             const mappedVariants = (product.variants || []).map((variant: any) => this.mapVariantForResponse(variant));
+            const marketplaceConfig = await this.getMarketplaceSimpleVariantConfig(id);
 
             return {
                 ...ProductEntity.fromObject(product),
@@ -623,6 +817,8 @@ export class ProductService {
                 variantCount: mappedVariants.length,
                 imageCount: (product.images || []).length,
                 variantMode: this.resolveProductVariantMode(product.variants || []),
+                marketplaceVariantColorIds: marketplaceConfig?.colorIds || [],
+                marketplaceVariantSizeIds: marketplaceConfig?.sizeIds || [],
                 variants: mappedVariants,
                 images: (product.images || []).map((i: any) => ProductImageEntity.fromObject(i)),
             };
@@ -643,8 +839,6 @@ export class ProductService {
             variants: {
                 some: {
                     isActive: true,
-                    ...(colorId ? { colorId } : {}),
-                    ...(sizeId ? { sizeId } : {}),
                 },
             },
         };
@@ -678,6 +872,36 @@ export class ProductService {
             },
         });
 
+        const marketplaceConfigByProductId = await this.getMarketplaceSimpleVariantConfigs(
+            products.map((product) => Number(product.id)),
+        );
+        const allMarketplaceColorIds = Array.from(
+            new Set(
+                Array.from(marketplaceConfigByProductId.values()).flatMap((config) => config.colorIds),
+            ),
+        );
+        const allMarketplaceSizeIds = Array.from(
+            new Set(
+                Array.from(marketplaceConfigByProductId.values()).flatMap((config) => config.sizeIds),
+            ),
+        );
+        const [marketplaceColors, marketplaceSizes] = await Promise.all([
+            allMarketplaceColorIds.length > 0
+                ? prisma.color.findMany({
+                    where: { id: { in: allMarketplaceColorIds }, isActive: true },
+                    select: { id: true, name: true, hex: true },
+                })
+                : Promise.resolve([]),
+            allMarketplaceSizeIds.length > 0
+                ? prisma.size.findMany({
+                    where: { id: { in: allMarketplaceSizeIds }, isActive: true },
+                    select: { id: true, name: true },
+                })
+                : Promise.resolve([]),
+        ]);
+        const marketplaceColorById = new Map(marketplaceColors.map((color) => [Number(color.id), color]));
+        const marketplaceSizeById = new Map(marketplaceSizes.map((size) => [Number(size.id), size]));
+
         const variantIds = products.flatMap((product) => product.variants.map((variant) => variant.id));
         const stockGroups = variantIds.length > 0
             ? await prisma.inventory.groupBy({
@@ -702,7 +926,7 @@ export class ProductService {
         });
 
         const mapped = products.map((product) => {
-            const variants = product.variants.map((variant) => {
+            const realVariants = product.variants.map((variant) => {
                 const stock = stockByVariant.get(variant.id) ?? { stock: 0, reservedStock: 0, availableStock: 0 };
                 const colorName = variant.color?.name ?? '';
                 const sizeName = variant.size?.name ?? '';
@@ -711,6 +935,7 @@ export class ProductService {
 
                 return {
                     id: variant.id,
+                    sourceVariantId: variant.id,
                     sku: variant.sku,
                     barcode: variant.barcode,
                     price: Number(variant.price || 0),
@@ -721,8 +946,33 @@ export class ProductService {
                     reservedStock: stock.reservedStock,
                     isSimpleVariant,
                     isSizeOnlyVariant,
+                    isVirtualMarketplaceVariant: false,
                 };
             });
+
+            const variantMode = this.resolveProductVariantMode(product.variants || []);
+            const marketplaceConfig = marketplaceConfigByProductId.get(Number(product.id));
+            let variants: any[] = realVariants as any[];
+
+            if (variantMode === 'SIMPLE' && marketplaceConfig && realVariants.length > 0) {
+                const baseVariant = realVariants[0];
+                const configuredColors = marketplaceConfig.colorIds
+                    .map((id) => marketplaceColorById.get(id))
+                    .filter((color): color is { id: number; name: string; hex: string | null } => Boolean(color));
+                const configuredSizes = marketplaceConfig.sizeIds
+                    .map((id) => marketplaceSizeById.get(id))
+                    .filter((size): size is { id: number; name: string } => Boolean(size));
+
+                if (baseVariant && configuredColors.length > 0 && configuredSizes.length > 0) {
+                    variants = this.buildPublicVariantsForSimpleMode(
+                        baseVariant,
+                        Number(baseVariant.availableStock || 0),
+                        Number(baseVariant.reservedStock || 0),
+                        configuredColors,
+                        configuredSizes,
+                    );
+                }
+            }
 
             const prices = variants.map((variant) => Number(variant.price || 0)).filter((price) => Number.isFinite(price));
             const minPrice = prices.length ? Math.min(...prices) : 0;
@@ -771,6 +1021,12 @@ export class ProductService {
         });
 
         const filtered = mapped.filter((product) => {
+            if (colorId && !product.colors.some((color) => Number(color.id) === Number(colorId))) {
+                return false;
+            }
+            if (sizeId && !product.sizes.some((size) => Number(size.id) === Number(sizeId))) {
+                return false;
+            }
             if (inStock === true && !product.hasStock) {
                 return false;
             }
@@ -844,7 +1100,7 @@ export class ProductService {
             });
         });
 
-        const variants = product.variants.map((variant) => {
+        const realVariants = product.variants.map((variant) => {
             const stock = stockByVariant.get(variant.id) ?? { stock: 0, reservedStock: 0, availableStock: 0 };
             const colorName = variant.color?.name ?? '';
             const sizeName = variant.size?.name ?? '';
@@ -853,6 +1109,7 @@ export class ProductService {
 
             return {
                 id: variant.id,
+                sourceVariantId: variant.id,
                 sku: variant.sku,
                 barcode: variant.barcode,
                 price: Number(variant.price || 0),
@@ -863,8 +1120,46 @@ export class ProductService {
                 reservedStock: stock.reservedStock,
                 isSimpleVariant,
                 isSizeOnlyVariant,
+                isVirtualMarketplaceVariant: false,
             };
         });
+
+        const variantMode = this.resolveProductVariantMode(product.variants || []);
+        const marketplaceConfig = await this.getMarketplaceSimpleVariantConfig(id);
+        let variants: any[] = realVariants as any[];
+
+        if (variantMode === 'SIMPLE' && marketplaceConfig && realVariants.length > 0) {
+            const [colorsFromConfig, sizesFromConfig] = await Promise.all([
+                prisma.color.findMany({
+                    where: { id: { in: marketplaceConfig.colorIds }, isActive: true },
+                    select: { id: true, name: true, hex: true },
+                }),
+                prisma.size.findMany({
+                    where: { id: { in: marketplaceConfig.sizeIds }, isActive: true },
+                    select: { id: true, name: true },
+                }),
+            ]);
+
+            const colorById = new Map(colorsFromConfig.map((color) => [Number(color.id), color]));
+            const sizeById = new Map(sizesFromConfig.map((size) => [Number(size.id), size]));
+            const configuredColors = marketplaceConfig.colorIds
+                .map((colorId) => colorById.get(colorId))
+                .filter((color): color is { id: number; name: string; hex: string | null } => Boolean(color));
+            const configuredSizes = marketplaceConfig.sizeIds
+                .map((sizeId) => sizeById.get(sizeId))
+                .filter((size): size is { id: number; name: string } => Boolean(size));
+
+            const baseVariant = realVariants[0];
+            if (baseVariant && configuredColors.length > 0 && configuredSizes.length > 0) {
+                variants = this.buildPublicVariantsForSimpleMode(
+                    baseVariant,
+                    Number(baseVariant.availableStock || 0),
+                    Number(baseVariant.reservedStock || 0),
+                    configuredColors,
+                    configuredSizes,
+                );
+            }
+        }
 
         const prices = variants.map((variant) => Number(variant.price || 0)).filter((price) => Number.isFinite(price));
         const minPrice = prices.length ? Math.min(...prices) : 0;
@@ -1118,7 +1413,15 @@ export class ProductService {
         updateData: UpdateProductDto,
     ): Promise<ProductEntity> {
         try {
-            const product = await prisma.product.findUnique({ where: { id } });
+            const product = await prisma.product.findUnique({
+                where: { id },
+                include: {
+                    variants: {
+                        where: { isActive: true },
+                        include: { color: true, size: true },
+                    },
+                },
+            });
 
             if (!product) {
                 throw CustomError.notFound(`El producto con ID ${id} no existe`);
@@ -1128,8 +1431,10 @@ export class ProductService {
                 await this.validateCategory(updateData.categoryId);
             }
 
-            const isSimpleMode = updateData.variantMode === 'SIMPLE';
-            const isSizeOnlyMode = updateData.variantMode === 'SIZE_ONLY';
+            const currentMode = this.resolveProductVariantMode(product.variants || []);
+            const nextMode = updateData.variantMode ?? currentMode;
+            const isSimpleMode = nextMode === 'SIMPLE';
+            const isSizeOnlyMode = nextMode === 'SIZE_ONLY';
 
             if (updateData.colorIds && !isSimpleMode && !isSizeOnlyMode) {
                 await this.validateColors(updateData.colorIds);
@@ -1137,6 +1442,24 @@ export class ProductService {
 
             if (updateData.sizeIds && !isSimpleMode) {
                 await this.validateSizes(updateData.sizeIds);
+            }
+
+            let simpleMarketplaceConfigToPersist: MarketplaceSimpleVariantConfig | null | undefined;
+            const hasSimpleMarketplaceChanges =
+                updateData.variantMode !== undefined ||
+                updateData.colorIds !== undefined ||
+                updateData.sizeIds !== undefined;
+
+            if (hasSimpleMarketplaceChanges) {
+                if (isSimpleMode) {
+                    simpleMarketplaceConfigToPersist = await this.resolveSimpleMarketplaceConfig(
+                        'SIMPLE',
+                        updateData.colorIds ?? [],
+                        updateData.sizeIds ?? [],
+                    );
+                } else {
+                    simpleMarketplaceConfigToPersist = null;
+                }
             }
 
             if (updateData.imageUrls || updateData.imageFiles) {
@@ -1187,6 +1510,10 @@ export class ProductService {
                 }
             }
 
+            if (simpleMarketplaceConfigToPersist !== undefined) {
+                await this.upsertMarketplaceSimpleVariantConfig(id, simpleMarketplaceConfigToPersist);
+            }
+
             const updated = await prisma.product.update({
                 where: { id },
                 data: {
@@ -1218,6 +1545,8 @@ export class ProductService {
             if (!product) {
                 throw CustomError.notFound(`El producto con ID ${id} no existe`);
             }
+
+            await this.upsertMarketplaceSimpleVariantConfig(id, null);
 
             // Eliminar producto (las imágenes y variantes se eliminarán en cascada)
             await prisma.product.delete({ where: { id } });

@@ -18,6 +18,9 @@ export class CreateMarketplaceOrderDto {
             variantId: number;
             quantity: number;
             unitPrice?: number;
+            colorName?: string;
+            sizeName?: string;
+            displayVariantId?: number;
         }>,
     ) {}
 
@@ -72,12 +75,24 @@ export class CreateMarketplaceOrderDto {
             return ['El pedido debe incluir al menos una variante', undefined];
         }
 
-        const normalizedItems: Array<{ variantId: number; quantity: number; unitPrice?: number }> = [];
+        const normalizedItems: Array<{
+            variantId: number;
+            quantity: number;
+            unitPrice?: number;
+            colorName?: string;
+            sizeName?: string;
+            displayVariantId?: number;
+        }> = [];
         for (const item of items) {
             const rawItem = item as { [key: string]: unknown };
             const variantId = Number(rawItem.variantId);
             const quantity = Number(rawItem.quantity);
             const unitPrice = rawItem.unitPrice !== undefined ? Number(rawItem.unitPrice) : undefined;
+            const colorName = typeof rawItem.colorName === 'string' ? rawItem.colorName.trim() : undefined;
+            const sizeName = typeof rawItem.sizeName === 'string' ? rawItem.sizeName.trim() : undefined;
+            const displayVariantId = rawItem.displayVariantId !== undefined
+                ? Number(rawItem.displayVariantId)
+                : undefined;
 
             if (!Number.isInteger(variantId) || variantId < 1) {
                 return ['Cada item debe incluir variantId valido', undefined];
@@ -89,12 +104,28 @@ export class CreateMarketplaceOrderDto {
                 return ['unitPrice no es valido', undefined];
             }
 
-            const normalizedItem: { variantId: number; quantity: number; unitPrice?: number } = {
+            const normalizedItem: {
+                variantId: number;
+                quantity: number;
+                unitPrice?: number;
+                colorName?: string;
+                sizeName?: string;
+                displayVariantId?: number;
+            } = {
                 variantId,
                 quantity,
             };
             if (unitPrice !== undefined) {
                 normalizedItem.unitPrice = unitPrice;
+            }
+            if (colorName) {
+                normalizedItem.colorName = colorName;
+            }
+            if (sizeName) {
+                normalizedItem.sizeName = sizeName;
+            }
+            if (displayVariantId !== undefined && Number.isInteger(displayVariantId) && displayVariantId > 0) {
+                normalizedItem.displayVariantId = displayVariantId;
             }
 
             normalizedItems.push(normalizedItem);

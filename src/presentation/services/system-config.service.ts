@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../data/prisma';
 import { UpdateOrderWorkflowSettingsDto } from '../../domain/dtos/update-order-workflow-settings.dto';
 import {
+    MARKETPLACE_AUTO_RESERVE_STOCK_KEY,
     MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
     MARKETPLACE_INCLUDE_IGV_KEY,
     MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
@@ -95,12 +96,13 @@ export class SystemConfigService {
     }
 
     async getOrderWorkflowSettings() {
-        const [returnResponsibilityRaw, pickingResponsibilityFlowRaw, marketplacePaymentsRaw, marketplacePaymentIdsRaw, marketplaceIncludeIgvRaw, activeMethodIds] = await Promise.all([
+        const [returnResponsibilityRaw, pickingResponsibilityFlowRaw, marketplacePaymentsRaw, marketplacePaymentIdsRaw, marketplaceIncludeIgvRaw, marketplaceAutoReserveStockRaw, activeMethodIds] = await Promise.all([
             this.getSettingValue(RETURN_RESPONSIBILITY_MANAGEMENT_KEY),
             this.getSettingValue(PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY),
             this.getSettingValue(MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY),
             this.getSettingValue(MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY),
             this.getSettingValue(MARKETPLACE_INCLUDE_IGV_KEY),
+            this.getSettingValue(MARKETPLACE_AUTO_RESERVE_STOCK_KEY),
             this.getActivePaymentMethodIds(),
         ]);
 
@@ -115,6 +117,7 @@ export class SystemConfigService {
             marketplacePaymentMethodsEnabled: this.parseBoolean(marketplacePaymentsRaw, false),
             marketplacePaymentMethodIds: fallbackIds,
             marketplaceIncludeIgv: this.parseBoolean(marketplaceIncludeIgvRaw, true),
+            marketplaceAutoReserveStock: this.parseBoolean(marketplaceAutoReserveStockRaw, false),
         };
     }
 
@@ -131,6 +134,8 @@ export class SystemConfigService {
             ?? currentSettings.marketplacePaymentMethodsEnabled;
         const marketplaceIncludeIgv = dto.marketplaceIncludeIgv
             ?? currentSettings.marketplaceIncludeIgv;
+        const marketplaceAutoReserveStock = dto.marketplaceAutoReserveStock
+            ?? currentSettings.marketplaceAutoReserveStock;
 
         const incomingIds = dto.marketplacePaymentMethodIds ?? currentSettings.marketplacePaymentMethodIds;
         const sanitizedIds = this.normalizeIds(incomingIds).filter((id) => activeIdSet.has(id));
@@ -159,6 +164,10 @@ export class SystemConfigService {
         await this.upsertSettingValue(
             MARKETPLACE_INCLUDE_IGV_KEY,
             marketplaceIncludeIgv ? 'true' : 'false',
+        );
+        await this.upsertSettingValue(
+            MARKETPLACE_AUTO_RESERVE_STOCK_KEY,
+            marketplaceAutoReserveStock ? 'true' : 'false',
         );
 
         return this.getOrderWorkflowSettings();

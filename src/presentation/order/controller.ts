@@ -793,6 +793,76 @@ export class OrderController {
     };
 
     /**
+     * Actualizar picking de una fila especifica de la orden
+     * PATCH /api/orders/:id/picking/order-items/:orderItemId
+     */
+    updatePickingOrderItem = async (req: AuthRequest, res: Response) => {
+        const { id, orderItemId } = req.params;
+        const pickedQuantity = Number(req.body?.pickedQuantity);
+
+        if (!id || isNaN(Number(id))) {
+            return res.status(400).json({ error: 'ID invalido' });
+        }
+
+        if (!orderItemId || isNaN(Number(orderItemId))) {
+            return res.status(400).json({ error: 'orderItemId invalido' });
+        }
+
+        if (!Number.isFinite(pickedQuantity) || pickedQuantity < 0) {
+            return res.status(400).json({ error: 'pickedQuantity debe ser >= 0' });
+        }
+        if (!Number.isInteger(pickedQuantity)) {
+            return res.status(400).json({ error: 'pickedQuantity debe ser entero' });
+        }
+
+        try {
+            const picking = await this.orderService.updatePickingOrderItem(
+                Number(id),
+                Number(orderItemId),
+                pickedQuantity,
+                req.user?.id,
+            );
+
+            const pickedItem = Array.isArray(picking?.items)
+                ? picking.items.find((item: any) => Number(item?.orderItemId || 0) === Number(orderItemId))
+                : null;
+
+            this.registerUserActivity(req, {
+                module: 'PICKING',
+                actionType: 'PICKING_ORDER_ITEM_UPDATED',
+                actionLabel: 'Fila de picking actualizada',
+                entityType: 'ORDER',
+                entityId: Number(picking?.orderId || id) || null,
+                entityCode: picking?.orderCode ? String(picking.orderCode) : null,
+                description: `Fila ${orderItemId} actualizada a ${pickedQuantity} und.`,
+                products: pickedItem
+                    ? this.mapProductsFromOrderItems([{
+                        variantId: pickedItem.variantId,
+                        quantity: pickedItem.pickedQuantity,
+                        variant: pickedItem.variant,
+                    }])
+                    : [],
+                context: {
+                    orderItemId: Number(orderItemId),
+                    pickedQuantity: Number(pickedQuantity),
+                    pickingItemId: Number(pickedItem?.pickingItemId || 0) || null,
+                },
+            });
+
+            res.status(200).json({
+                success: true,
+                data: picking,
+                message: 'Fila de picking actualizada exitosamente',
+            });
+        } catch (error) {
+            if (error instanceof CustomError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
+    };
+
+    /**
      * Solicitar accion de unpick sobre unidades separadas por otro colaborador
      * POST /api/orders/:id/picking/items/:itemId/unpick-request
      */
