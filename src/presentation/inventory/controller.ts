@@ -5,11 +5,59 @@ import { CustomError } from "../../domain/errors/custom.error";
 import { CreateInventoryMovementDto } from "../../domain/dtos/create-inventory-movement.dto";
 import { CreateStockTransferDto } from "../../domain/dtos/create-stock-transfer.dto";
 import { CreateReservationDto } from "../../domain/dtos/create-reservation.dto";
+import { UserActivityProduct, UserActivityService } from "../services/user-activity.service";
 
 export class InventoryController {
     constructor(
         private readonly inventoryService: InventoryService,
+        private readonly userActivityService: UserActivityService = new UserActivityService(),
     ) { }
+
+    private mapProductFromVariant(variant: any, quantity?: number): UserActivityProduct | null {
+        const variantId = Number(variant?.id || variant?.variantId || 0);
+        if (!Number.isInteger(variantId) || variantId < 1) {
+            return null;
+        }
+
+        return {
+            variantId,
+            sku: variant?.sku ? String(variant.sku) : null,
+            productName: variant?.product?.name ? String(variant.product.name) : null,
+            color: variant?.color?.name ? String(variant.color.name) : null,
+            size: variant?.size?.name ? String(variant.size.name) : null,
+            quantity: Number.isFinite(Number(quantity)) ? Number(quantity) : null,
+        };
+    }
+
+    private registerUserActivity(
+        req: AuthRequest,
+        payload: {
+            module: string;
+            actionType: string;
+            actionLabel: string;
+            entityType: string;
+            entityId?: number | null;
+            entityCode?: string | null;
+            description?: string | null;
+            products?: UserActivityProduct[];
+            context?: Record<string, unknown>;
+        },
+    ) {
+        void this.userActivityService.register({
+            userId: req.user?.id ?? null,
+            userEmail: req.user?.email ?? null,
+            userRole: req.user?.role ?? null,
+            module: payload.module,
+            actionType: payload.actionType,
+            actionLabel: payload.actionLabel,
+            entityType: payload.entityType,
+            entityId: payload.entityId ?? null,
+            entityCode: payload.entityCode ?? null,
+            description: payload.description ?? null,
+            products: Array.isArray(payload.products) ? payload.products.filter(Boolean) : [],
+            context: payload.context ?? {},
+        });
+    }
 
     private handleError(error: unknown, res: Response) {
         if (error instanceof CustomError) {
@@ -98,8 +146,28 @@ export class InventoryController {
         }
 
         try {
-            const movement = await this.inventoryService.createMovement(dto, req.user?.id);
-            return res.status(201).json(movement);
+            const result = await this.inventoryService.createMovement(dto, req.user?.id);
+
+            this.registerUserActivity(req, {
+                module: 'INVENTORY',
+                actionType: 'INVENTORY_MOVEMENT_CREATED',
+                actionLabel: 'Movimiento de inventario registrado',
+                entityType: 'INVENTORY_MOVEMENT',
+                entityId: Number(result?.movement?.id || 0) || null,
+                description: `${dto.type} de ${dto.quantity} und. en tienda ${dto.storeId}`,
+                products: [{
+                    variantId: Number(dto.variantId),
+                    quantity: Number(dto.quantity),
+                }],
+                context: {
+                    movementType: dto.type,
+                    storeId: Number(dto.storeId),
+                    inventoryId: Number(result?.movement?.inventoryId || 0) || null,
+                    note: dto.note ?? null,
+                },
+            });
+
+            return res.status(201).json(result);
         } catch (err) {
             return this.handleError(err, res);
         }
@@ -118,6 +186,30 @@ export class InventoryController {
 
         try {
             const transfer = await this.inventoryService.createStockTransfer(dto, req.user?.id);
+
+            const transferProducts = Array.isArray(transfer?.items)
+                ? transfer.items
+                    .map((item: any) => this.mapProductFromVariant(item?.variant, Number(item?.quantity || 0)))
+                    .filter((item): item is UserActivityProduct => Boolean(item))
+                : [];
+
+            this.registerUserActivity(req, {
+                module: 'TRANSFERS',
+                actionType: 'TRANSFER_CREATED',
+                actionLabel: 'Transferencia de stock creada',
+                entityType: 'TRANSFER',
+                entityId: Number(transfer?.id || 0) || null,
+                entityCode: transfer?.code ? String(transfer.code) : null,
+                description: `Transferencia ${transfer?.code || ''} creada de tienda ${dto.fromStoreId} a ${dto.toStoreId}`.trim(),
+                products: transferProducts,
+                context: {
+                    fromStoreId: Number(dto.fromStoreId),
+                    toStoreId: Number(dto.toStoreId),
+                    itemsCount: Array.isArray(dto.items) ? dto.items.length : 0,
+                    note: dto.note ?? null,
+                },
+            });
+
             return res.status(201).json(transfer);
         } catch (err) {
             return this.handleError(err, res);
@@ -133,6 +225,30 @@ export class InventoryController {
 
         try {
             const result = await this.inventoryService.receiveStockTransfer(Number(id), req.user?.id);
+
+            const transfer = result?.transfer;
+            const transferProducts = Array.isArray(transfer?.items)
+                ? transfer.items
+                    .map((item: any) => this.mapProductFromVariant(item?.variant, Number(item?.quantity || 0)))
+                    .filter((item): item is UserActivityProduct => Boolean(item))
+                : [];
+
+            this.registerUserActivity(req, {
+                module: 'TRANSFERS',
+                actionType: 'TRANSFER_RECEIVED',
+                actionLabel: 'Transferencia recibida',
+                entityType: 'TRANSFER',
+                entityId: Number(transfer?.id || id) || null,
+                entityCode: transfer?.code ? String(transfer.code) : null,
+                description: `Transferencia ${transfer?.code || id} recibida`,
+                products: transferProducts,
+                context: {
+                    transferId: Number(id),
+                    inventoriesUpdated: Array.isArray(result?.inventories) ? result.inventories.length : 0,
+                    toStoreId: Number(transfer?.toStoreId || 0) || null,
+                },
+            });
+
             return res.status(200).json(result);
         } catch (err) {
             return this.handleError(err, res);
@@ -151,8 +267,26 @@ export class InventoryController {
         }
 
         try {
-            const reservation = await this.inventoryService.createReservation(dto, req.user?.id);
-            return res.status(201).json(reservation);
+            const result = await this.inventoryService.createReservation(dto, req.user?.id);
+
+            this.registerUserActivity(req, {
+                module: 'INVENTORY',
+                actionType: 'RESERVATION_CREATED',
+                actionLabel: 'Reserva de stock creada',
+                entityType: 'RESERVATION',
+                entityId: Number(result?.reservation?.id || 0) || null,
+                description: `Reserva de ${dto.quantity} und. en inventario ${dto.inventoryId}`,
+                products: [{
+                    variantId: Number(result?.reservation?.variantId || 0),
+                    quantity: Number(dto.quantity),
+                }],
+                context: {
+                    inventoryId: Number(dto.inventoryId),
+                    orderId: dto.orderId ?? null,
+                },
+            });
+
+            return res.status(201).json(result);
         } catch (err) {
             return this.handleError(err, res);
         }
@@ -166,6 +300,21 @@ export class InventoryController {
                 .filter((value: number) => Number.isInteger(value) && value > 0);
 
             const result = await this.inventoryService.reconcileReservedStock(inventoryIds, req.user?.id);
+
+            this.registerUserActivity(req, {
+                module: 'INVENTORY',
+                actionType: 'RESERVED_STOCK_RECONCILED',
+                actionLabel: 'Reconciliacion de stock reservado',
+                entityType: 'INVENTORY_RECONCILE',
+                description: `Reconciliacion ejecutada sobre ${result.processedInventoryCount} inventarios`,
+                context: {
+                    adjustedCount: result.adjustedCount,
+                    unchangedCount: result.unchangedCount,
+                    requestedInventoryCount: result.requestedInventoryCount ?? null,
+                    processedInventoryCount: result.processedInventoryCount,
+                },
+            });
+
             return res.status(200).json(result);
         } catch (error) {
             return this.handleError(error, res);

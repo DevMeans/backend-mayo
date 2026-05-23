@@ -493,7 +493,31 @@ export class InventoryService {
             };
         });
 
-        return receivedTransfer;
+        const transferWithDetails = await prisma.stockTransfer.findUnique({
+            where: { id: transferId },
+            include: {
+                fromStore: true,
+                toStore: true,
+                createdBy: true,
+                receivedBy: true,
+                items: {
+                    include: {
+                        variant: {
+                            include: {
+                                product: true,
+                                color: true,
+                                size: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        return {
+            transfer: transferWithDetails,
+            inventories: receivedTransfer.inventories,
+        };
     }
 
     async createReservation(dto: CreateReservationDto, userId?: number | undefined) {

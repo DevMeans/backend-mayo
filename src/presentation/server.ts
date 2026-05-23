@@ -2,6 +2,8 @@ import express, { Router } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
+import { AuditLogMiddleware } from './audit-log/middleware';
+import { AuditLogService } from './services/audit-log.service';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,6 +32,7 @@ export class Server {
         this.app.use(express.json({ limit: '15mb' }));
         this.app.use(cors());   
         this.app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+        this.app.use(AuditLogMiddleware.capture(new AuditLogService()));
 
         const publicDir = path.isAbsolute(this.publicPath)
             ? this.publicPath

@@ -14,6 +14,8 @@ import { orderRoute } from "./order/router";
 import { publicRoute } from "./public/router";
 import { paymentMethodRoute } from "./payment-method/router";
 import { systemConfigRoute } from "./system-config/router";
+import { auditLogRoute } from "./audit-log/router";
+import { userActivityRoute } from "./user-activity/router";
 
 export class AppRouter{
 
@@ -35,6 +37,8 @@ export class AppRouter{
         router.use('/api/orders', AuthMiddleware.validateJWT, orderRoute.router);
         router.use('/api/payment-methods', AuthMiddleware.validateJWT, paymentMethodRoute.router);
         router.use('/api/system-config', AuthMiddleware.validateJWT, systemConfigRoute.router);
+        router.use('/api/audit-logs', AuthMiddleware.validateJWT, auditLogRoute.router);
+        router.use('/api/user-activities', AuthMiddleware.validateJWT, userActivityRoute.router);
 
         return router;
     }

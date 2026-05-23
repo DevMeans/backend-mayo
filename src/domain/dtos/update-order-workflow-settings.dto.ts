@@ -1,14 +1,18 @@
 export class UpdateOrderWorkflowSettingsDto {
     private constructor(
         public readonly returnResponsibilityManagementEnabled?: boolean,
+        public readonly pickingResponsibilityFlowEnabled?: boolean,
         public readonly marketplacePaymentMethodsEnabled?: boolean,
         public readonly marketplacePaymentMethodIds?: number[],
+        public readonly marketplaceIncludeIgv?: boolean,
     ) {}
 
     static create(object: { [key: string]: any }): [string | undefined, UpdateOrderWorkflowSettingsDto | undefined] {
         const rawReturnFlag = object?.returnResponsibilityManagementEnabled;
+        const rawPickingResponsibilityFlowFlag = object?.pickingResponsibilityFlowEnabled;
         const rawMarketplaceFlag = object?.marketplacePaymentMethodsEnabled;
         const rawMarketplaceMethodIds = object?.marketplacePaymentMethodIds;
+        const rawMarketplaceIncludeIgv = object?.marketplaceIncludeIgv;
 
         let returnResponsibilityManagementEnabled: boolean | undefined;
         if (rawReturnFlag !== undefined) {
@@ -16,6 +20,14 @@ export class UpdateOrderWorkflowSettingsDto {
                 return ['returnResponsibilityManagementEnabled debe ser booleano', undefined];
             }
             returnResponsibilityManagementEnabled = rawReturnFlag;
+        }
+
+        let pickingResponsibilityFlowEnabled: boolean | undefined;
+        if (rawPickingResponsibilityFlowFlag !== undefined) {
+            if (typeof rawPickingResponsibilityFlowFlag !== 'boolean') {
+                return ['pickingResponsibilityFlowEnabled debe ser booleano', undefined];
+            }
+            pickingResponsibilityFlowEnabled = rawPickingResponsibilityFlowFlag;
         }
 
         let marketplacePaymentMethodsEnabled: boolean | undefined;
@@ -40,10 +52,20 @@ export class UpdateOrderWorkflowSettingsDto {
             marketplacePaymentMethodIds = Array.from(new Set(parsedIds));
         }
 
+        let marketplaceIncludeIgv: boolean | undefined;
+        if (rawMarketplaceIncludeIgv !== undefined) {
+            if (typeof rawMarketplaceIncludeIgv !== 'boolean') {
+                return ['marketplaceIncludeIgv debe ser booleano', undefined];
+            }
+            marketplaceIncludeIgv = rawMarketplaceIncludeIgv;
+        }
+
         if (
             returnResponsibilityManagementEnabled === undefined
+            && pickingResponsibilityFlowEnabled === undefined
             && marketplacePaymentMethodsEnabled === undefined
             && marketplacePaymentMethodIds === undefined
+            && marketplaceIncludeIgv === undefined
         ) {
             return ['Debes enviar al menos una configuracion para actualizar', undefined];
         }
@@ -52,8 +74,10 @@ export class UpdateOrderWorkflowSettingsDto {
             undefined,
             new UpdateOrderWorkflowSettingsDto(
                 returnResponsibilityManagementEnabled,
+                pickingResponsibilityFlowEnabled,
                 marketplacePaymentMethodsEnabled,
                 marketplacePaymentMethodIds,
+                marketplaceIncludeIgv,
             ),
         ];
     }

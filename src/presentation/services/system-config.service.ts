@@ -3,7 +3,9 @@ import { prisma } from '../../data/prisma';
 import { UpdateOrderWorkflowSettingsDto } from '../../domain/dtos/update-order-workflow-settings.dto';
 import {
     MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
+    MARKETPLACE_INCLUDE_IGV_KEY,
     MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
+    PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY,
     RETURN_RESPONSIBILITY_MANAGEMENT_KEY,
 } from '../../data/system-config-keys';
 import { CustomError } from '../../domain/errors/custom.error';
@@ -93,10 +95,12 @@ export class SystemConfigService {
     }
 
     async getOrderWorkflowSettings() {
-        const [returnResponsibilityRaw, marketplacePaymentsRaw, marketplacePaymentIdsRaw, activeMethodIds] = await Promise.all([
+        const [returnResponsibilityRaw, pickingResponsibilityFlowRaw, marketplacePaymentsRaw, marketplacePaymentIdsRaw, marketplaceIncludeIgvRaw, activeMethodIds] = await Promise.all([
             this.getSettingValue(RETURN_RESPONSIBILITY_MANAGEMENT_KEY),
+            this.getSettingValue(PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY),
             this.getSettingValue(MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY),
             this.getSettingValue(MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY),
+            this.getSettingValue(MARKETPLACE_INCLUDE_IGV_KEY),
             this.getActivePaymentMethodIds(),
         ]);
 
@@ -107,8 +111,10 @@ export class SystemConfigService {
 
         return {
             returnResponsibilityManagementEnabled: this.parseBoolean(returnResponsibilityRaw, true),
+            pickingResponsibilityFlowEnabled: this.parseBoolean(pickingResponsibilityFlowRaw, false),
             marketplacePaymentMethodsEnabled: this.parseBoolean(marketplacePaymentsRaw, false),
             marketplacePaymentMethodIds: fallbackIds,
+            marketplaceIncludeIgv: this.parseBoolean(marketplaceIncludeIgvRaw, true),
         };
     }
 
@@ -119,8 +125,12 @@ export class SystemConfigService {
 
         const returnResponsibilityManagementEnabled = dto.returnResponsibilityManagementEnabled
             ?? currentSettings.returnResponsibilityManagementEnabled;
+        const pickingResponsibilityFlowEnabled = dto.pickingResponsibilityFlowEnabled
+            ?? currentSettings.pickingResponsibilityFlowEnabled;
         const marketplacePaymentMethodsEnabled = dto.marketplacePaymentMethodsEnabled
             ?? currentSettings.marketplacePaymentMethodsEnabled;
+        const marketplaceIncludeIgv = dto.marketplaceIncludeIgv
+            ?? currentSettings.marketplaceIncludeIgv;
 
         const incomingIds = dto.marketplacePaymentMethodIds ?? currentSettings.marketplacePaymentMethodIds;
         const sanitizedIds = this.normalizeIds(incomingIds).filter((id) => activeIdSet.has(id));
@@ -135,12 +145,20 @@ export class SystemConfigService {
             returnResponsibilityManagementEnabled ? 'true' : 'false',
         );
         await this.upsertSettingValue(
+            PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY,
+            pickingResponsibilityFlowEnabled ? 'true' : 'false',
+        );
+        await this.upsertSettingValue(
             MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
             marketplacePaymentMethodsEnabled ? 'true' : 'false',
         );
         await this.upsertSettingValue(
             MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
             JSON.stringify(marketplacePaymentMethodIds),
+        );
+        await this.upsertSettingValue(
+            MARKETPLACE_INCLUDE_IGV_KEY,
+            marketplaceIncludeIgv ? 'true' : 'false',
         );
 
         return this.getOrderWorkflowSettings();

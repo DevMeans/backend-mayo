@@ -1,8 +1,9 @@
-export class CreateOrderDto {
+﻿export class CreateOrderDto {
     private constructor(
         public readonly sourceStoreId: number,
         public readonly fulfillmentStoreId?: number,
         public readonly sellerUserId?: number,
+        public readonly applyIgv?: boolean,
         public readonly clientName?: string,
         public readonly clientEmail?: string,
         public readonly clientPhone?: string,
@@ -19,6 +20,7 @@ export class CreateOrderDto {
             sourceStoreId,
             fulfillmentStoreId,
             sellerUserId,
+            applyIgv,
             clientName,
             clientEmail,
             clientPhone,
@@ -28,7 +30,7 @@ export class CreateOrderDto {
 
         // Validar tienda origen
         if (!sourceStoreId || typeof sourceStoreId !== 'number' || sourceStoreId < 1) {
-            return ['La tienda origen es obligatoria y debe ser un número válido', undefined];
+            return ['La tienda origen es obligatoria y debe ser un nÃºmero vÃ¡lido', undefined];
         }
 
         // Validar items
@@ -38,25 +40,30 @@ export class CreateOrderDto {
 
         for (const item of items) {
             if (!item.variantId || typeof item.variantId !== 'number' || item.variantId < 1) {
-                return ['Cada item debe tener un variantId válido', undefined];
+                return ['Cada item debe tener un variantId vÃ¡lido', undefined];
             }
             if (!item.quantity || typeof item.quantity !== 'number' || item.quantity < 1) {
-                return ['Cada item debe tener una cantidad válida mayor a 0', undefined];
+                return ['Cada item debe tener una cantidad vÃ¡lida mayor a 0', undefined];
             }
             if (item.unitPrice === undefined || typeof item.unitPrice !== 'number' || item.unitPrice < 0) {
-                return ['Cada item debe tener un precio válido', undefined];
+                return ['Cada item debe tener un precio vÃ¡lido', undefined];
             }
         }
 
         // Validar email si se proporciona
         if (clientEmail && !this.isValidEmail(clientEmail)) {
-            return ['El email del cliente no es válido', undefined];
+            return ['El email del cliente no es valido', undefined];
+        }
+
+        if (applyIgv !== undefined && typeof applyIgv !== 'boolean') {
+            return ['applyIgv debe ser booleano', undefined];
         }
 
         return [undefined, new CreateOrderDto(
             sourceStoreId,
             fulfillmentStoreId,
             sellerUserId,
+            applyIgv,
             clientName,
             clientEmail,
             clientPhone,
@@ -70,3 +77,4 @@ export class CreateOrderDto {
         return emailRegex.test(email);
     }
 }
+

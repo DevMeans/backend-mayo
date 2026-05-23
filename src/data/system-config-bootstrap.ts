@@ -1,7 +1,9 @@
 import { prisma } from './prisma';
 import {
+    MARKETPLACE_INCLUDE_IGV_KEY,
     MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
     MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
+    PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY,
     RETURN_RESPONSIBILITY_MANAGEMENT_KEY,
 } from './system-config-keys';
 
@@ -19,8 +21,10 @@ const SYSTEM_CONFIG_SCHEMA_STATEMENTS: string[] = [
 
 const DEFAULT_SYSTEM_SETTINGS: Array<{ key: string; value: string }> = [
     { key: RETURN_RESPONSIBILITY_MANAGEMENT_KEY, value: 'true' },
+    { key: PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY, value: 'false' },
     { key: MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY, value: 'false' },
     { key: MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY, value: '[]' },
+    { key: MARKETPLACE_INCLUDE_IGV_KEY, value: 'true' },
 ];
 
 export async function ensureSystemConfigSchema(): Promise<void> {

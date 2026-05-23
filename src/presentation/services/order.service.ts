@@ -10,9 +10,16 @@ import { CreateMarketplaceOrderDto } from "../../domain/dtos/create-marketplace-
 import { TrackMarketplaceOrderDto } from "../../domain/dtos/track-marketplace-order.dto";
 import { DelegateOrderReturnDto } from "../../domain/dtos/delegate-order-return.dto";
 import { ListMarketplaceOrdersDto } from "../../domain/dtos/list-marketplace-orders.dto";
+import { DelegatePickingResponsibilityDto, PickingResponsibilityMode } from "../../domain/dtos/delegate-picking-responsibility.dto";
+import { RequestPickingResponsibilityDto } from "../../domain/dtos/request-picking-responsibility.dto";
+import { ResolvePickingResponsibilityRequestDto } from "../../domain/dtos/resolve-picking-responsibility-request.dto";
+import { RequestPickingUnpickActionDto } from "../../domain/dtos/request-picking-unpick-action.dto";
+import { ResolvePickingUnpickActionDto } from "../../domain/dtos/resolve-picking-unpick-action.dto";
 import {
     MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY,
+    MARKETPLACE_INCLUDE_IGV_KEY,
     MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY,
+    PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY,
     RETURN_RESPONSIBILITY_MANAGEMENT_KEY,
 } from "../../data/system-config-keys";
 
@@ -27,6 +34,117 @@ type MarketplacePaymentMethod = {
 type MarketplacePaymentSettings = {
     enabled: boolean;
     allowedPaymentMethodIds: number[];
+    includeIgv: boolean;
+};
+
+type PickingSharedResponsibilityRow = {
+    id: number;
+    orderId: number;
+    userId: number;
+    assignedByUserId: number | null;
+    source: string;
+    note: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    userFirstName: string | null;
+    userLastName: string | null;
+    userEmail: string | null;
+    assignedByFirstName: string | null;
+    assignedByLastName: string | null;
+    assignedByEmail: string | null;
+};
+
+type PickingResponsibilityRequestRow = {
+    id: number;
+    orderId: number;
+    requesterUserId: number;
+    mode: string;
+    status: string;
+    note: string | null;
+    resolvedByUserId: number | null;
+    resolvedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+    requesterFirstName: string | null;
+    requesterLastName: string | null;
+    requesterEmail: string | null;
+    resolvedByFirstName: string | null;
+    resolvedByLastName: string | null;
+    resolvedByEmail: string | null;
+};
+
+type PickingResponsibilityContext = {
+    enabled: boolean;
+    primaryResponsible: {
+        id: number;
+        firstName: string;
+        lastName: string;
+        email: string;
+    } | null;
+    sharedResponsibles: Array<{
+        id: number;
+        user: {
+            id: number;
+            firstName: string;
+            lastName: string;
+            email: string;
+        };
+        source: string;
+        note: string | null;
+        assignedBy: {
+            id: number;
+            firstName: string;
+            lastName: string;
+            email: string;
+        } | null;
+        createdAt: Date;
+        updatedAt: Date;
+    }>;
+    pendingRequests: Array<{
+        id: number;
+        requester: {
+            id: number;
+            firstName: string;
+            lastName: string;
+            email: string;
+        };
+        mode: PickingResponsibilityMode;
+        note: string | null;
+        createdAt: Date;
+    }>;
+};
+
+type PickingItemContributionRow = {
+    id: number;
+    orderId: number;
+    pickingItemId: number;
+    userId: number;
+    quantity: number;
+    createdAt: Date;
+    updatedAt: Date;
+    userFirstName: string | null;
+    userLastName: string | null;
+    userEmail: string | null;
+};
+
+type PickingUnpickRequestRow = {
+    id: number;
+    orderId: number;
+    pickingItemId: number;
+    requesterUserId: number;
+    quantity: number;
+    status: string;
+    note: string | null;
+    resolvedByUserId: number | null;
+    resolvedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+    requesterFirstName: string | null;
+    requesterLastName: string | null;
+    requesterEmail: string | null;
+    resolvedByFirstName: string | null;
+    resolvedByLastName: string | null;
+    resolvedByEmail: string | null;
 };
 
 export class OrderService {
@@ -114,16 +232,485 @@ export class OrderService {
         }
     }
 
+    private normalizePickingResponsibilityMode(rawValue: unknown, fallback: PickingResponsibilityMode = 'SHARED'): PickingResponsibilityMode {
+        const normalized = String(rawValue || '').trim().toUpperCase();
+        return normalized === 'TRANSFER' ? 'TRANSFER' : fallback;
+    }
+
+    private async isPickingResponsibilityFlowEnabled(dbClient: any = prisma): Promise<boolean> {
+        try {
+            const setting = await this.getSystemSettingValue(PICKING_RESPONSIBILITY_FLOW_ENABLED_KEY, dbClient);
+            return this.parseBooleanSetting(setting, false);
+        } catch {
+            return false;
+        }
+    }
+
+    private mapPickingSharedResponsibilityRows(rows: PickingSharedResponsibilityRow[]) {
+        return rows.map((row) => ({
+            id: Number(row.id),
+            user: {
+                id: Number(row.userId),
+                firstName: String(row.userFirstName || ''),
+                lastName: String(row.userLastName || ''),
+                email: String(row.userEmail || ''),
+            },
+            source: String(row.source || 'DELEGATION'),
+            note: row.note || null,
+            assignedBy: row.assignedByUserId
+                ? {
+                    id: Number(row.assignedByUserId),
+                    firstName: String(row.assignedByFirstName || ''),
+                    lastName: String(row.assignedByLastName || ''),
+                    email: String(row.assignedByEmail || ''),
+                }
+                : null,
+            createdAt: row.createdAt ? new Date(row.createdAt) : new Date(),
+            updatedAt: row.updatedAt ? new Date(row.updatedAt) : new Date(),
+        }));
+    }
+
+    private mapPickingResponsibilityRequestRows(rows: PickingResponsibilityRequestRow[]) {
+        return rows
+            .filter((row) => String(row.status || '').toUpperCase() === 'PENDING')
+            .map((row) => ({
+                id: Number(row.id),
+                requester: {
+                    id: Number(row.requesterUserId),
+                    firstName: String(row.requesterFirstName || ''),
+                    lastName: String(row.requesterLastName || ''),
+                    email: String(row.requesterEmail || ''),
+                },
+                mode: this.normalizePickingResponsibilityMode(row.mode, 'SHARED'),
+                note: row.note || null,
+                createdAt: row.createdAt ? new Date(row.createdAt) : new Date(),
+            }));
+    }
+
+    private async listPickingSharedResponsibilityRows(orderId: number, dbClient: any = prisma): Promise<PickingSharedResponsibilityRow[]> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    psr."id",
+                    psr."orderId",
+                    psr."userId",
+                    psr."assignedByUserId",
+                    psr."source",
+                    psr."note",
+                    psr."createdAt",
+                    psr."updatedAt",
+                    u."firstName" AS "userFirstName",
+                    u."lastName" AS "userLastName",
+                    u."email" AS "userEmail",
+                    assigner."firstName" AS "assignedByFirstName",
+                    assigner."lastName" AS "assignedByLastName",
+                    assigner."email" AS "assignedByEmail"
+                FROM "PickingSharedResponsibility" psr
+                INNER JOIN "User" u ON u."id" = psr."userId"
+                LEFT JOIN "User" assigner ON assigner."id" = psr."assignedByUserId"
+                WHERE psr."orderId" = ${orderId}
+                  AND psr."isActive" = true
+                ORDER BY psr."createdAt" ASC
+            `,
+        );
+        return rows as PickingSharedResponsibilityRow[];
+    }
+
+    private async listPickingResponsibilityRequestRows(orderId: number, dbClient: any = prisma): Promise<PickingResponsibilityRequestRow[]> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    prr."id",
+                    prr."orderId",
+                    prr."requesterUserId",
+                    prr."mode",
+                    prr."status",
+                    prr."note",
+                    prr."resolvedByUserId",
+                    prr."resolvedAt",
+                    prr."createdAt",
+                    prr."updatedAt",
+                    requester."firstName" AS "requesterFirstName",
+                    requester."lastName" AS "requesterLastName",
+                    requester."email" AS "requesterEmail",
+                    resolver."firstName" AS "resolvedByFirstName",
+                    resolver."lastName" AS "resolvedByLastName",
+                    resolver."email" AS "resolvedByEmail"
+                FROM "PickingResponsibilityRequest" prr
+                INNER JOIN "User" requester ON requester."id" = prr."requesterUserId"
+                LEFT JOIN "User" resolver ON resolver."id" = prr."resolvedByUserId"
+                WHERE prr."orderId" = ${orderId}
+                ORDER BY prr."createdAt" DESC
+            `,
+        );
+        return rows as PickingResponsibilityRequestRow[];
+    }
+
+    private async buildPickingResponsibilityContext(
+        orderId: number,
+        primaryResponsibleUser: any | null,
+        dbClient: any = prisma,
+    ): Promise<PickingResponsibilityContext> {
+        const enabled = await this.isPickingResponsibilityFlowEnabled(dbClient);
+        const [sharedRows, requestRows] = await Promise.all([
+            this.listPickingSharedResponsibilityRows(orderId, dbClient),
+            this.listPickingResponsibilityRequestRows(orderId, dbClient),
+        ]);
+
+        const primaryResponsible = primaryResponsibleUser
+            ? {
+                id: Number(primaryResponsibleUser.id),
+                firstName: String(primaryResponsibleUser.firstName || ''),
+                lastName: String(primaryResponsibleUser.lastName || ''),
+                email: String(primaryResponsibleUser.email || ''),
+            }
+            : null;
+
+        return {
+            enabled,
+            primaryResponsible,
+            sharedResponsibles: this.mapPickingSharedResponsibilityRows(sharedRows),
+            pendingRequests: this.mapPickingResponsibilityRequestRows(requestRows),
+        };
+    }
+
+    private async isActiveSharedResponsible(orderId: number, userId: number, dbClient: any = prisma): Promise<boolean> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT "id"
+                FROM "PickingSharedResponsibility"
+                WHERE "orderId" = ${orderId}
+                  AND "userId" = ${userId}
+                  AND "isActive" = true
+                LIMIT 1
+            `,
+        ) as Array<{ id: number }>;
+        return rows.length > 0;
+    }
+
+    private async canUserOperatePicking(orderId: number, actorUserId: number, primaryResponsibleUserId?: number | null, dbClient: any = prisma): Promise<boolean> {
+        const flowEnabled = await this.isPickingResponsibilityFlowEnabled(dbClient);
+        if (!flowEnabled) {
+            return true;
+        }
+
+        if (Number(primaryResponsibleUserId || 0) === Number(actorUserId)) {
+            return true;
+        }
+
+        return this.isActiveSharedResponsible(orderId, actorUserId, dbClient);
+    }
+
+    private async ensurePrimaryPickerCanDelegate(orderId: number, actorUserId: number, dbClient: any = prisma): Promise<any> {
+        const order = await dbClient.order.findUnique({
+            where: { id: orderId },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+
+        const flowEnabled = await this.isPickingResponsibilityFlowEnabled(dbClient);
+        if (!flowEnabled) {
+            return order;
+        }
+
+        const primaryUserId = Number(order.pickerUserId || 0);
+        if (!primaryUserId) {
+            throw CustomError.badRequest('La orden no tiene responsable principal de picking');
+        }
+
+        if (primaryUserId !== Number(actorUserId)) {
+            throw CustomError.forbidden('Solo el responsable principal puede delegar picking');
+        }
+
+        return order;
+    }
+
+    private async upsertSharedPickingResponsibility(
+        orderId: number,
+        userId: number,
+        assignedByUserId: number,
+        source: 'DELEGATION' | 'REQUEST_APPROVAL',
+        note?: string,
+        dbClient: any = prisma,
+    ): Promise<void> {
+        const existingRows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT "id"
+                FROM "PickingSharedResponsibility"
+                WHERE "orderId" = ${orderId}
+                  AND "userId" = ${userId}
+                LIMIT 1
+            `,
+        ) as Array<{ id: number }>;
+
+        if (existingRows.length > 0) {
+            await dbClient.$executeRaw(
+                Prisma.sql`
+                    UPDATE "PickingSharedResponsibility"
+                    SET "isActive" = true,
+                        "assignedByUserId" = ${assignedByUserId},
+                        "source" = ${source},
+                        "note" = ${note ?? null},
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    WHERE "id" = ${existingRows[0]!.id}
+                `,
+            );
+            return;
+        }
+
+        await dbClient.$executeRaw(
+            Prisma.sql`
+                INSERT INTO "PickingSharedResponsibility" (
+                    "orderId",
+                    "userId",
+                    "assignedByUserId",
+                    "source",
+                    "note",
+                    "isActive"
+                )
+                VALUES (
+                    ${orderId},
+                    ${userId},
+                    ${assignedByUserId},
+                    ${source},
+                    ${note ?? null},
+                    true
+                )
+            `,
+        );
+    }
+
+    private async listPickingItemContributionRows(orderId: number, dbClient: any = prisma): Promise<PickingItemContributionRow[]> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    pic."id",
+                    pic."orderId",
+                    pic."pickingItemId",
+                    pic."userId",
+                    pic."quantity",
+                    pic."createdAt",
+                    pic."updatedAt",
+                    u."firstName" AS "userFirstName",
+                    u."lastName" AS "userLastName",
+                    u."email" AS "userEmail"
+                FROM "PickingItemContribution" pic
+                INNER JOIN "User" u ON u."id" = pic."userId"
+                WHERE pic."orderId" = ${orderId}
+                  AND pic."quantity" > 0
+                ORDER BY pic."pickingItemId" ASC, pic."createdAt" ASC
+            `,
+        );
+        return rows as PickingItemContributionRow[];
+    }
+
+    private async listPickingUnpickRequestRows(orderId: number, dbClient: any = prisma): Promise<PickingUnpickRequestRow[]> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    pur."id",
+                    pur."orderId",
+                    pur."pickingItemId",
+                    pur."requesterUserId",
+                    pur."quantity",
+                    pur."status",
+                    pur."note",
+                    pur."resolvedByUserId",
+                    pur."resolvedAt",
+                    pur."createdAt",
+                    pur."updatedAt",
+                    requester."firstName" AS "requesterFirstName",
+                    requester."lastName" AS "requesterLastName",
+                    requester."email" AS "requesterEmail",
+                    resolver."firstName" AS "resolvedByFirstName",
+                    resolver."lastName" AS "resolvedByLastName",
+                    resolver."email" AS "resolvedByEmail"
+                FROM "PickingUnpickRequest" pur
+                INNER JOIN "User" requester ON requester."id" = pur."requesterUserId"
+                LEFT JOIN "User" resolver ON resolver."id" = pur."resolvedByUserId"
+                WHERE pur."orderId" = ${orderId}
+                ORDER BY pur."createdAt" DESC
+            `,
+        );
+        return rows as PickingUnpickRequestRow[];
+    }
+
+    private buildPickingItemContributionMap(rows: PickingItemContributionRow[]) {
+        const map = new Map<number, Array<{
+            id: number;
+            user: { id: number; firstName: string; lastName: string; email: string };
+            quantity: number;
+            createdAt: Date;
+            updatedAt: Date;
+        }>>();
+
+        for (const row of rows) {
+            const pickingItemId = Number(row.pickingItemId || 0);
+            if (!Number.isInteger(pickingItemId) || pickingItemId < 1) continue;
+
+            const entry = {
+                id: Number(row.id),
+                user: {
+                    id: Number(row.userId),
+                    firstName: String(row.userFirstName || ''),
+                    lastName: String(row.userLastName || ''),
+                    email: String(row.userEmail || ''),
+                },
+                quantity: Math.max(0, Number(row.quantity || 0)),
+                createdAt: row.createdAt ? new Date(row.createdAt) : new Date(),
+                updatedAt: row.updatedAt ? new Date(row.updatedAt) : new Date(),
+            };
+
+            const bucket = map.get(pickingItemId) || [];
+            bucket.push(entry);
+            map.set(pickingItemId, bucket);
+        }
+
+        return map;
+    }
+
+    private buildPendingUnpickRequestMap(rows: PickingUnpickRequestRow[]) {
+        const map = new Map<number, Array<{
+            id: number;
+            pickingItemId: number;
+            requester: { id: number; firstName: string; lastName: string; email: string };
+            quantity: number;
+            note: string | null;
+            createdAt: Date;
+        }>>();
+
+        for (const row of rows) {
+            const status = String(row.status || '').toUpperCase();
+            if (status !== 'PENDING') continue;
+
+            const pickingItemId = Number(row.pickingItemId || 0);
+            if (!Number.isInteger(pickingItemId) || pickingItemId < 1) continue;
+
+            const entry = {
+                id: Number(row.id),
+                pickingItemId,
+                requester: {
+                    id: Number(row.requesterUserId),
+                    firstName: String(row.requesterFirstName || ''),
+                    lastName: String(row.requesterLastName || ''),
+                    email: String(row.requesterEmail || ''),
+                },
+                quantity: Math.max(0, Number(row.quantity || 0)),
+                note: row.note || null,
+                createdAt: row.createdAt ? new Date(row.createdAt) : new Date(),
+            };
+
+            const bucket = map.get(pickingItemId) || [];
+            bucket.push(entry);
+            map.set(pickingItemId, bucket);
+        }
+
+        return map;
+    }
+
+    private async getPickingItemUserContribution(
+        orderId: number,
+        pickingItemId: number,
+        userId: number,
+        dbClient: any = prisma,
+    ): Promise<number> {
+        const rows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT "quantity"
+                FROM "PickingItemContribution"
+                WHERE "orderId" = ${orderId}
+                  AND "pickingItemId" = ${pickingItemId}
+                  AND "userId" = ${userId}
+                LIMIT 1
+            `,
+        ) as Array<{ quantity: number }>;
+
+        return Math.max(0, Number(rows?.[0]?.quantity || 0));
+    }
+
+    private async updatePickingItemUserContribution(
+        orderId: number,
+        pickingItemId: number,
+        userId: number,
+        deltaQuantity: number,
+        dbClient: any = prisma,
+    ): Promise<number> {
+        const normalizedDelta = Number(deltaQuantity);
+        if (!Number.isFinite(normalizedDelta) || normalizedDelta === 0) {
+            return this.getPickingItemUserContribution(orderId, pickingItemId, userId, dbClient);
+        }
+
+        const existingRows = await dbClient.$queryRaw(
+            Prisma.sql`
+                SELECT "id", "quantity"
+                FROM "PickingItemContribution"
+                WHERE "orderId" = ${orderId}
+                  AND "pickingItemId" = ${pickingItemId}
+                  AND "userId" = ${userId}
+                LIMIT 1
+            `,
+        ) as Array<{ id: number; quantity: number }>;
+
+        if (!existingRows.length) {
+            const initialQuantity = Math.max(0, Math.round(normalizedDelta));
+            if (initialQuantity <= 0) {
+                return 0;
+            }
+            await dbClient.$executeRaw(
+                Prisma.sql`
+                    INSERT INTO "PickingItemContribution" (
+                        "orderId",
+                        "pickingItemId",
+                        "userId",
+                        "quantity"
+                    )
+                    VALUES (
+                        ${orderId},
+                        ${pickingItemId},
+                        ${userId},
+                        ${initialQuantity}
+                    )
+                `,
+            );
+            return initialQuantity;
+        }
+
+        const currentQuantity = Math.max(0, Number(existingRows[0]!.quantity || 0));
+        const nextQuantity = Math.max(0, currentQuantity + Math.round(normalizedDelta));
+        await dbClient.$executeRaw(
+            Prisma.sql`
+                UPDATE "PickingItemContribution"
+                SET "quantity" = ${nextQuantity},
+                    "updatedAt" = CURRENT_TIMESTAMP
+                WHERE "id" = ${existingRows[0]!.id}
+            `,
+        );
+
+        return nextQuantity;
+    }
+
     private async getMarketplacePaymentSettings(dbClient: any = prisma): Promise<MarketplacePaymentSettings> {
-        const [enabledRaw, allowedIdsRaw] = await Promise.all([
+        const [enabledRaw, allowedIdsRaw, includeIgvRaw] = await Promise.all([
             this.getSystemSettingValue(MARKETPLACE_PAYMENT_METHODS_ENABLED_KEY, dbClient),
             this.getSystemSettingValue(MARKETPLACE_ALLOWED_PAYMENT_METHOD_IDS_KEY, dbClient),
+            this.getSystemSettingValue(MARKETPLACE_INCLUDE_IGV_KEY, dbClient),
         ]);
 
         return {
             enabled: this.parseBooleanSetting(enabledRaw, false),
             allowedPaymentMethodIds: this.parseNumberArraySetting(allowedIdsRaw),
+            includeIgv: this.parseBooleanSetting(includeIgvRaw, true),
         };
+    }
+
+    private resolveTaxAmount(subtotal: number, includeIgv: boolean): number {
+        if (!includeIgv) {
+            return 0;
+        }
+        return subtotal * 0.18;
     }
 
     private async listActivePaymentMethods(dbClient: any = prisma): Promise<MarketplacePaymentMethod[]> {
@@ -360,6 +947,23 @@ export class OrderService {
         return this.mapOrderWithPickingSummary(baseMappedOrder);
     }
 
+    private async attachPickingResponsibilityData(order: any, dbClient: any = prisma) {
+        if (!order || !Number.isInteger(Number(order.id)) || Number(order.id) < 1) {
+            return order;
+        }
+
+        const context = await this.buildPickingResponsibilityContext(
+            Number(order.id),
+            order.pickerUser || order.pickingSession?.assignedUser || null,
+            dbClient,
+        );
+
+        return {
+            ...order,
+            pickingResponsibility: context,
+        };
+    }
+
     private readonly orderDetailInclude = {
         items: {
             include: { variant: { include: { product: true, color: true, size: true } } },
@@ -544,7 +1148,8 @@ export class OrderService {
         const subtotal = dto.items.reduce((sum, item) => {
             return sum + item.quantity * item.unitPrice;
         }, 0);
-        const tax = subtotal * 0.18; // IGV 18%
+        const includeIgv = dto.applyIgv === undefined ? true : dto.applyIgv;
+        const tax = this.resolveTaxAmount(subtotal, includeIgv);
         const total = subtotal + tax;
 
         // Crear pedido con items
@@ -614,7 +1219,10 @@ export class OrderService {
     }
 
     async createMarketplaceOrder(dto: CreateMarketplaceOrderDto) {
-        const selectedPaymentMethod = await this.resolveMarketplacePaymentMethod(dto.paymentMethodId);
+        const [selectedPaymentMethod, marketplaceSettings] = await Promise.all([
+            this.resolveMarketplacePaymentMethod(dto.paymentMethodId),
+            this.getMarketplacePaymentSettings(),
+        ]);
 
         const sourceStore = await prisma.store.findFirst({
             where: { id: dto.sourceStoreId, isActive: true },
@@ -709,7 +1317,7 @@ export class OrderService {
                 });
             }
 
-            const tax = subtotal * 0.18;
+            const tax = this.resolveTaxAmount(subtotal, marketplaceSettings.includeIgv);
             const total = subtotal + tax;
             const status = OrderStatusEnum.PENDING;
 
@@ -928,6 +1536,8 @@ export class OrderService {
 
         return {
             enabled: settings.enabled,
+            includeIgv: settings.includeIgv,
+            igvRate: 0.18,
             methods: availableMethods.map((method) => ({
                 id: method.id,
                 name: method.name,
@@ -1019,7 +1629,8 @@ export class OrderService {
             throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
         }
 
-        return this.mapOrderWithPresentationData(order);
+        const mapped = this.mapOrderWithPresentationData(order);
+        return this.attachPickingResponsibilityData(mapped);
     }
 
     /**
@@ -1186,6 +1797,7 @@ export class OrderService {
         const returnResponsibilityManagementEnabled = await this.isReturnResponsibilityManagementEnabled();
 
         await prisma.$transaction(async (tx) => {
+            const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled(tx);
             const isReturnCompletion = currentStatus === OrderStatusEnum.RETURN_PENDING && targetStatus === OrderStatusEnum.CANCELLED;
             const isCancellationRequest = (targetStatus === OrderStatusEnum.CANCELLED && currentStatus !== OrderStatusEnum.RETURN_PENDING)
                 || targetStatus === OrderStatusEnum.RETURN_PENDING;
@@ -1198,6 +1810,19 @@ export class OrderService {
 
             let nextOrderStatus = targetStatus;
             const orderUpdateData: any = { updatedAt: new Date() };
+
+            if (pickingResponsibilityFlowEnabled && targetStatus === OrderStatusEnum.CONFIRMED) {
+                const confirmedByUserId = this.resolvePreferredResponsibleUserId(responsibleUserId);
+                if (!confirmedByUserId) {
+                    throw CustomError.unauthorized('No se pudo identificar al usuario que confirmo el pedido');
+                }
+
+                orderUpdateData.pickerUserId = confirmedByUserId;
+                await tx.pickingSession.updateMany({
+                    where: { orderId },
+                    data: { assignedUserId: confirmedByUserId },
+                });
+            }
 
             const releaseActiveReservations = async (actorUserId: number | null, note: string) => {
                 for (const reservation of activeReservations) {
@@ -1371,6 +1996,42 @@ export class OrderService {
                 where: { id: orderId },
                 data: orderUpdateData,
             });
+
+            if (nextOrderStatus === OrderStatusEnum.CANCELLED || nextOrderStatus === OrderStatusEnum.DELIVERED) {
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingSharedResponsibility"
+                        SET "isActive" = false,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "isActive" = true
+                    `,
+                );
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingResponsibilityRequest"
+                        SET "status" = 'CANCELLED',
+                            "resolvedByUserId" = ${this.resolvePreferredResponsibleUserId(responsibleUserId)},
+                            "resolvedAt" = CURRENT_TIMESTAMP,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "status" = 'PENDING'
+                    `,
+                );
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingUnpickRequest"
+                        SET "status" = 'CANCELLED',
+                            "resolvedByUserId" = ${this.resolvePreferredResponsibleUserId(responsibleUserId)},
+                            "resolvedAt" = CURRENT_TIMESTAMP,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "status" = 'PENDING'
+                    `,
+                );
+            }
         });
 
         const updatedOrder = await prisma.order.findUnique({
@@ -1378,14 +2039,26 @@ export class OrderService {
             include: this.orderDetailInclude,
         });
 
-        return this.mapOrderWithPresentationData(updatedOrder);
+        const mapped = this.mapOrderWithPresentationData(updatedOrder);
+        return this.attachPickingResponsibilityData(mapped);
     }
 
     /**
      * Asignar responsable a un pedido
      */
-    async assignResponsible(orderId: number, dto: AssignOrderResponsibleDto) {
-        await this.getOrderById(orderId);
+    async assignResponsible(orderId: number, dto: AssignOrderResponsibleDto, actorUserId?: number) {
+        const currentOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            select: {
+                id: true,
+                pickerUserId: true,
+                status: true,
+            },
+        });
+
+        if (!currentOrder) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
 
         // Validar que el usuario existe
         const user = await prisma.user.findUnique({
@@ -1394,6 +2067,19 @@ export class OrderService {
 
         if (!user) {
             throw CustomError.badRequest(`El usuario con ID ${dto.userId} no existe`);
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (dto.roleType === 'picker' && pickingResponsibilityFlowEnabled) {
+            const actorId = this.resolvePreferredResponsibleUserId(actorUserId);
+            if (!actorId) {
+                throw CustomError.unauthorized('No se pudo identificar al usuario que delega picking');
+            }
+
+            const currentPrimaryUserId = Number(currentOrder.pickerUserId || 0);
+            if (currentPrimaryUserId > 0 && currentPrimaryUserId !== actorId) {
+                throw CustomError.forbidden('Solo el responsable principal de picking puede delegar');
+            }
         }
 
         const updateData: any = {};
@@ -1418,12 +2104,652 @@ export class OrderService {
                     where: { orderId },
                     data: { assignedUserId: dto.userId },
                 });
+
+                if (pickingResponsibilityFlowEnabled) {
+                    await tx.$executeRaw(
+                        Prisma.sql`
+                            UPDATE "PickingSharedResponsibility"
+                            SET "isActive" = false,
+                                "updatedAt" = CURRENT_TIMESTAMP
+                            WHERE "orderId" = ${orderId}
+                              AND "userId" = ${dto.userId}
+                              AND "isActive" = true
+                        `,
+                    );
+                }
             }
 
             return order;
         });
 
-        return this.mapOrderWithPresentationData(updatedOrder);
+        const mapped = this.mapOrderWithPresentationData(updatedOrder);
+        return this.attachPickingResponsibilityData(mapped);
+    }
+
+    async requestPickingResponsibility(orderId: number, dto: RequestPickingResponsibilityDto, requesterUserId?: number) {
+        const actorUserId = this.resolvePreferredResponsibleUserId(requesterUserId);
+        if (!actorUserId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que solicita responsabilidad');
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (!pickingResponsibilityFlowEnabled) {
+            throw CustomError.badRequest('El flujo de responsabilidad en picking esta desactivado');
+        }
+
+        const order = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: this.orderDetailInclude,
+        });
+
+        if (!order) {
+            throw CustomError.notFound(`El pedido con ID ${orderId} no existe`);
+        }
+
+        const orderStatus = String(order.status || '').toUpperCase();
+        const allowedStatuses = new Set(['CONFIRMED', 'WAITING_TRANSFER', 'PREPARING', 'READY']);
+        if (!allowedStatuses.has(orderStatus)) {
+            throw CustomError.badRequest('El pedido no permite solicitudes de responsabilidad en su estado actual');
+        }
+
+        if (Number(order.pickerUserId || 0) === actorUserId) {
+            throw CustomError.badRequest('Ya eres el responsable principal de picking');
+        }
+
+        const alreadyShared = await this.isActiveSharedResponsible(orderId, actorUserId);
+        if (alreadyShared) {
+            throw CustomError.badRequest('Ya participas como responsable compartido en este picking');
+        }
+
+        const mode = this.normalizePickingResponsibilityMode(dto.mode, 'SHARED');
+        const existingPending = await prisma.$queryRaw<Array<{ id: number }>>(
+            Prisma.sql`
+                SELECT "id"
+                FROM "PickingResponsibilityRequest"
+                WHERE "orderId" = ${orderId}
+                  AND "requesterUserId" = ${actorUserId}
+                  AND "status" = 'PENDING'
+                  AND "mode" = ${mode}
+                LIMIT 1
+            `,
+        );
+
+        if (existingPending.length > 0) {
+            throw CustomError.badRequest('Ya tienes una solicitud pendiente para este pedido');
+        }
+
+        await prisma.$executeRaw(
+            Prisma.sql`
+                INSERT INTO "PickingResponsibilityRequest" (
+                    "orderId",
+                    "requesterUserId",
+                    "mode",
+                    "status",
+                    "note"
+                )
+                VALUES (
+                    ${orderId},
+                    ${actorUserId},
+                    ${mode},
+                    'PENDING',
+                    ${dto.note ?? null}
+                )
+            `,
+        );
+
+        return this.getOrderPicking(orderId);
+    }
+
+    async delegatePickingResponsibility(orderId: number, dto: DelegatePickingResponsibilityDto, delegatedByUserId?: number) {
+        const actorUserId = this.resolvePreferredResponsibleUserId(delegatedByUserId);
+        if (!actorUserId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que delega picking');
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (!pickingResponsibilityFlowEnabled) {
+            throw CustomError.badRequest('El flujo de responsabilidad en picking esta desactivado');
+        }
+
+        const mode = this.normalizePickingResponsibilityMode(dto.mode, 'TRANSFER');
+        const order = await this.ensurePrimaryPickerCanDelegate(orderId, actorUserId);
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: dto.userId },
+        });
+        if (!targetUser) {
+            throw CustomError.badRequest(`El usuario con ID ${dto.userId} no existe`);
+        }
+
+        if (mode === 'TRANSFER') {
+            await prisma.$transaction(async (tx) => {
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: {
+                        pickerUserId: dto.userId,
+                        updatedAt: new Date(),
+                    },
+                });
+
+                await tx.pickingSession.updateMany({
+                    where: { orderId },
+                    data: { assignedUserId: dto.userId },
+                });
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingSharedResponsibility"
+                        SET "isActive" = false,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "userId" = ${dto.userId}
+                          AND "isActive" = true
+                    `,
+                );
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingResponsibilityRequest"
+                        SET "status" = 'APPROVED',
+                            "resolvedByUserId" = ${actorUserId},
+                            "resolvedAt" = CURRENT_TIMESTAMP,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "requesterUserId" = ${dto.userId}
+                          AND "status" = 'PENDING'
+                    `,
+                );
+            });
+        } else {
+            if (Number(order.pickerUserId || 0) === Number(dto.userId)) {
+                throw CustomError.badRequest('El usuario ya es el responsable principal');
+            }
+
+            await prisma.$transaction(async (tx) => {
+                await this.upsertSharedPickingResponsibility(
+                    orderId,
+                    dto.userId,
+                    actorUserId,
+                    'DELEGATION',
+                    dto.note,
+                    tx,
+                );
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingResponsibilityRequest"
+                        SET "status" = 'APPROVED',
+                            "resolvedByUserId" = ${actorUserId},
+                            "resolvedAt" = CURRENT_TIMESTAMP,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "requesterUserId" = ${dto.userId}
+                          AND "status" = 'PENDING'
+                    `,
+                );
+            });
+        }
+
+        return this.getOrderPicking(orderId);
+    }
+
+    async resolvePickingResponsibilityRequest(
+        orderId: number,
+        requestId: number,
+        dto: ResolvePickingResponsibilityRequestDto,
+        resolvedByUserId?: number,
+    ) {
+        const actorUserId = this.resolvePreferredResponsibleUserId(resolvedByUserId);
+        if (!actorUserId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que resuelve la solicitud');
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (!pickingResponsibilityFlowEnabled) {
+            throw CustomError.badRequest('El flujo de responsabilidad en picking esta desactivado');
+        }
+
+        await this.ensurePrimaryPickerCanDelegate(orderId, actorUserId);
+
+        const rows = await prisma.$queryRaw<Array<{
+            id: number;
+            requesterUserId: number;
+            mode: string;
+            status: string;
+        }>>(
+            Prisma.sql`
+                SELECT "id", "requesterUserId", "mode", "status"
+                FROM "PickingResponsibilityRequest"
+                WHERE "id" = ${requestId}
+                  AND "orderId" = ${orderId}
+                LIMIT 1
+            `,
+        );
+
+        if (!rows.length) {
+            throw CustomError.notFound('No se encontro la solicitud de responsabilidad');
+        }
+
+        const requestRow = rows[0]!;
+        const currentStatus = String(requestRow.status || '').toUpperCase();
+        if (currentStatus !== 'PENDING') {
+            throw CustomError.badRequest('La solicitud ya fue resuelta anteriormente');
+        }
+
+        const action = String(dto.action || '').toUpperCase();
+        if (action === 'REJECT') {
+            await prisma.$executeRaw(
+                Prisma.sql`
+                    UPDATE "PickingResponsibilityRequest"
+                    SET "status" = 'REJECTED',
+                        "resolvedByUserId" = ${actorUserId},
+                        "resolvedAt" = CURRENT_TIMESTAMP,
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    WHERE "id" = ${requestId}
+                `,
+            );
+            return this.getOrderPicking(orderId);
+        }
+
+        const requestMode = this.normalizePickingResponsibilityMode(requestRow.mode, 'SHARED');
+        await prisma.$transaction(async (tx) => {
+            if (requestMode === 'TRANSFER') {
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: { pickerUserId: Number(requestRow.requesterUserId), updatedAt: new Date() },
+                });
+
+                await tx.pickingSession.updateMany({
+                    where: { orderId },
+                    data: { assignedUserId: Number(requestRow.requesterUserId) },
+                });
+
+                await tx.$executeRaw(
+                    Prisma.sql`
+                        UPDATE "PickingSharedResponsibility"
+                        SET "isActive" = false,
+                            "updatedAt" = CURRENT_TIMESTAMP
+                        WHERE "orderId" = ${orderId}
+                          AND "userId" = ${Number(requestRow.requesterUserId)}
+                          AND "isActive" = true
+                    `,
+                );
+            } else {
+                await this.upsertSharedPickingResponsibility(
+                    orderId,
+                    Number(requestRow.requesterUserId),
+                    actorUserId,
+                    'REQUEST_APPROVAL',
+                    dto.note,
+                    tx,
+                );
+            }
+
+            await tx.$executeRaw(
+                Prisma.sql`
+                    UPDATE "PickingResponsibilityRequest"
+                    SET "status" = 'APPROVED',
+                        "resolvedByUserId" = ${actorUserId},
+                        "resolvedAt" = CURRENT_TIMESTAMP,
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    WHERE "id" = ${requestId}
+                `,
+            );
+        });
+
+        return this.getOrderPicking(orderId);
+    }
+
+    async requestPickingUnpickAction(
+        orderId: number,
+        pickingItemId: number,
+        dto: RequestPickingUnpickActionDto,
+        requesterUserId?: number,
+    ) {
+        const actorUserId = this.resolvePreferredResponsibleUserId(requesterUserId);
+        if (!actorUserId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que solicita la accion');
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (!pickingResponsibilityFlowEnabled) {
+            throw CustomError.badRequest('El flujo de responsabilidad en picking esta desactivado');
+        }
+
+        const pickingItem = await prisma.pickingItem.findUnique({
+            where: { id: pickingItemId },
+            include: {
+                session: {
+                    include: {
+                        order: {
+                            select: {
+                                id: true,
+                                status: true,
+                                pickerUserId: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        if (!pickingItem || !pickingItem.session?.order) {
+            throw CustomError.notFound(`No se encontro el item de picking ${pickingItemId}`);
+        }
+
+        if (Number(pickingItem.session.order.id) !== Number(orderId)) {
+            throw CustomError.badRequest('El item no pertenece a la orden indicada');
+        }
+
+        const validStatuses = new Set([
+            OrderStatusEnum.CONFIRMED,
+            OrderStatusEnum.PREPARING,
+            OrderStatusEnum.WAITING_TRANSFER,
+            OrderStatusEnum.READY,
+        ]);
+        if (!validStatuses.has(pickingItem.session.order.status as OrderStatusEnum)) {
+            throw CustomError.badRequest('La orden no permite solicitudes de unpick en su estado actual');
+        }
+
+        const canOperate = await this.canUserOperatePicking(
+            orderId,
+            actorUserId,
+            pickingItem.session.order.pickerUserId ?? pickingItem.session.assignedUserId ?? null,
+        );
+        if (!canOperate) {
+            throw CustomError.forbidden('No tienes responsabilidad asignada para solicitar esta accion');
+        }
+
+        const currentPickedQuantity = Math.max(0, Number(pickingItem.pickedQuantity || 0));
+        if (currentPickedQuantity <= 0) {
+            throw CustomError.badRequest('El item no tiene unidades separadas para solicitar unpick');
+        }
+
+        const ownContribution = await this.getPickingItemUserContribution(orderId, pickingItemId, actorUserId);
+        const maxRequestable = Math.max(0, currentPickedQuantity - ownContribution);
+        if (maxRequestable <= 0) {
+            throw CustomError.badRequest(
+                'No necesitas solicitud: solo hay unidades separadas por ti en este item',
+            );
+        }
+
+        const requestedQuantity = Number(dto.quantity || 0);
+        if (requestedQuantity > maxRequestable) {
+            throw CustomError.badRequest(`Solo puedes solicitar hasta ${maxRequestable} und para este item`);
+        }
+
+        const existingPending = await prisma.$queryRaw(
+            Prisma.sql`
+                SELECT "id"
+                FROM "PickingUnpickRequest"
+                WHERE "pickingItemId" = ${pickingItemId}
+                  AND "requesterUserId" = ${actorUserId}
+                  AND "status" = 'PENDING'
+                LIMIT 1
+            `,
+        ) as Array<{ id: number }>;
+        if (existingPending.length > 0) {
+            throw CustomError.badRequest('Ya tienes una solicitud pendiente para este item');
+        }
+
+        await prisma.$executeRaw(
+            Prisma.sql`
+                INSERT INTO "PickingUnpickRequest" (
+                    "orderId",
+                    "pickingItemId",
+                    "requesterUserId",
+                    "quantity",
+                    "status",
+                    "note"
+                )
+                VALUES (
+                    ${orderId},
+                    ${pickingItemId},
+                    ${actorUserId},
+                    ${requestedQuantity},
+                    'PENDING',
+                    ${dto.note ?? null}
+                )
+            `,
+        );
+
+        return this.getOrderPicking(orderId);
+    }
+
+    async resolvePickingUnpickAction(
+        orderId: number,
+        requestId: number,
+        dto: ResolvePickingUnpickActionDto,
+        resolvedByUserId?: number,
+    ) {
+        const actorUserId = this.resolvePreferredResponsibleUserId(resolvedByUserId);
+        if (!actorUserId) {
+            throw CustomError.unauthorized('No se pudo identificar al usuario que resuelve la solicitud');
+        }
+
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        if (!pickingResponsibilityFlowEnabled) {
+            throw CustomError.badRequest('El flujo de responsabilidad en picking esta desactivado');
+        }
+
+        const requestRows = await prisma.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    "id",
+                    "orderId",
+                    "pickingItemId",
+                    "requesterUserId",
+                    "quantity",
+                    "status"
+                FROM "PickingUnpickRequest"
+                WHERE "id" = ${requestId}
+                  AND "orderId" = ${orderId}
+                LIMIT 1
+            `,
+        ) as Array<{
+            id: number;
+            orderId: number;
+            pickingItemId: number;
+            requesterUserId: number;
+            quantity: number;
+            status: string;
+        }>;
+
+        if (!requestRows.length) {
+            throw CustomError.notFound('No se encontro la solicitud de unpick');
+        }
+
+        const requestRow = requestRows[0]!;
+        const currentStatus = String(requestRow.status || '').toUpperCase();
+        if (currentStatus !== 'PENDING') {
+            throw CustomError.badRequest('La solicitud de unpick ya fue resuelta');
+        }
+
+        if (Number(requestRow.requesterUserId) === Number(actorUserId)) {
+            throw CustomError.forbidden('No puedes aprobar o rechazar tu propia solicitud');
+        }
+
+        const pickingItem = await prisma.pickingItem.findUnique({
+            where: { id: Number(requestRow.pickingItemId) },
+            include: {
+                session: {
+                    include: {
+                        order: {
+                            include: {
+                                items: true,
+                                reservations: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        if (!pickingItem || !pickingItem.session?.order) {
+            throw CustomError.notFound('El item relacionado a la solicitud ya no existe');
+        }
+
+        if (Number(pickingItem.session.order.id) !== Number(orderId)) {
+            throw CustomError.badRequest('La solicitud no corresponde a la orden indicada');
+        }
+
+        const canOperate = await this.canUserOperatePicking(
+            orderId,
+            actorUserId,
+            pickingItem.session.order.pickerUserId ?? pickingItem.session.assignedUserId ?? null,
+        );
+        if (!canOperate) {
+            throw CustomError.forbidden('No tienes responsabilidad asignada para resolver esta solicitud');
+        }
+
+        const action = String(dto.action || '').trim().toUpperCase();
+        if (action === 'REJECT') {
+            await prisma.$executeRaw(
+                Prisma.sql`
+                    UPDATE "PickingUnpickRequest"
+                    SET "status" = 'REJECTED',
+                        "note" = COALESCE(${dto.note ?? null}, "note"),
+                        "resolvedByUserId" = ${actorUserId},
+                        "resolvedAt" = CURRENT_TIMESTAMP,
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    WHERE "id" = ${requestId}
+                `,
+            );
+            return this.getOrderPicking(orderId);
+        }
+
+        const requestedQuantity = Math.max(0, Number(requestRow.quantity || 0));
+        if (requestedQuantity < 1) {
+            throw CustomError.badRequest('La cantidad de la solicitud es invalida');
+        }
+
+        const order = pickingItem.session.order;
+        const orderItem = order.items.find((item: any) => Number(item.variantId) === Number(pickingItem.variantId));
+        if (!orderItem) {
+            throw CustomError.badRequest('La variante del item de picking no pertenece a la orden');
+        }
+
+        const currentPickedQuantity = Math.max(0, Number(pickingItem.pickedQuantity || 0));
+        if (currentPickedQuantity < requestedQuantity) {
+            throw CustomError.badRequest('La cantidad actual separada es menor a la solicitada');
+        }
+
+        const requesterContribution = await this.getPickingItemUserContribution(
+            orderId,
+            Number(requestRow.pickingItemId),
+            Number(requestRow.requesterUserId),
+        );
+        const maxReducibleFromOthers = Math.max(0, currentPickedQuantity - requesterContribution);
+        if (requestedQuantity > maxReducibleFromOthers) {
+            throw CustomError.badRequest(
+                `Ya no hay suficientes unidades de otros responsables para aprobar ${requestedQuantity} und`,
+            );
+        }
+
+        const contributorRows = await prisma.$queryRaw(
+            Prisma.sql`
+                SELECT
+                    "userId",
+                    "quantity"
+                FROM "PickingItemContribution"
+                WHERE "orderId" = ${orderId}
+                  AND "pickingItemId" = ${Number(requestRow.pickingItemId)}
+                  AND "quantity" > 0
+                  AND "userId" <> ${Number(requestRow.requesterUserId)}
+                ORDER BY
+                    CASE WHEN "userId" = ${actorUserId} THEN 0 ELSE 1 END ASC,
+                    "quantity" DESC,
+                    "userId" ASC
+            `,
+        ) as Array<{ userId: number; quantity: number }>;
+
+        if (contributorRows.length === 0) {
+            throw CustomError.badRequest('No hay responsables con unidades disponibles para aprobar esta solicitud');
+        }
+
+        const primaryResponsibleUserId = Number(order.pickerUserId || 0);
+        const isPrimaryResponsibleResolver = primaryResponsibleUserId > 0 && primaryResponsibleUserId === actorUserId;
+        const actorContribution = Math.max(
+            0,
+            Number(contributorRows.find((row) => Number(row.userId) === actorUserId)?.quantity || 0),
+        );
+
+        if (!isPrimaryResponsibleResolver && actorContribution < requestedQuantity) {
+            throw CustomError.forbidden(
+                'Solo el responsable principal o un colaborador con unidades suficientes puede aprobar la solicitud',
+            );
+        }
+
+        let remainingToReduce = requestedQuantity;
+        const reductionPlan: Array<{ userId: number; quantity: number }> = [];
+
+        if (!isPrimaryResponsibleResolver) {
+            reductionPlan.push({
+                userId: actorUserId,
+                quantity: requestedQuantity,
+            });
+            remainingToReduce = 0;
+        } else {
+            for (const contributor of contributorRows) {
+                if (remainingToReduce <= 0) break;
+
+                const contributorQuantity = Math.max(0, Number(contributor.quantity || 0));
+                if (contributorQuantity <= 0) continue;
+
+                const reductionQuantity = Math.min(contributorQuantity, remainingToReduce);
+                reductionPlan.push({
+                    userId: Number(contributor.userId),
+                    quantity: reductionQuantity,
+                });
+                remainingToReduce -= reductionQuantity;
+            }
+        }
+
+        if (remainingToReduce > 0) {
+            throw CustomError.badRequest('No se pudo completar la aprobacion por cambios recientes en las contribuciones');
+        }
+
+        const nextPickedQuantity = Math.max(0, currentPickedQuantity - requestedQuantity);
+
+        await prisma.$transaction(async (tx) => {
+            for (const reduction of reductionPlan) {
+                await this.updatePickingItemUserContribution(
+                    orderId,
+                    Number(requestRow.pickingItemId),
+                    Number(reduction.userId),
+                    -Math.abs(Number(reduction.quantity || 0)),
+                    tx,
+                );
+            }
+
+            await tx.pickingItem.update({
+                where: { id: Number(requestRow.pickingItemId) },
+                data: { pickedQuantity: nextPickedQuantity },
+            });
+
+            await tx.orderItem.update({
+                where: { id: orderItem.id },
+                data: {
+                    picked: nextPickedQuantity,
+                    status: this.mapOrderItemStatusFromPicked(nextPickedQuantity, Number(orderItem.quantity || 0)),
+                },
+            });
+
+            await tx.$executeRaw(
+                Prisma.sql`
+                    UPDATE "PickingUnpickRequest"
+                    SET "status" = 'APPROVED',
+                        "note" = COALESCE(${dto.note ?? null}, "note"),
+                        "resolvedByUserId" = ${actorUserId},
+                        "resolvedAt" = CURRENT_TIMESTAMP,
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    WHERE "id" = ${requestId}
+                `,
+            );
+        });
+
+        await this.syncPickingAndOrderStatus(orderId);
+        return this.getOrderPicking(orderId);
     }
 
     /**
@@ -1482,7 +2808,8 @@ export class OrderService {
             include: this.orderDetailInclude,
         });
 
-        return this.mapOrderWithPresentationData(updatedOrder);
+        const mapped = this.mapOrderWithPresentationData(updatedOrder);
+        return this.attachPickingResponsibilityData(mapped);
     }
 
     /**
@@ -1526,7 +2853,8 @@ export class OrderService {
             include: this.orderDetailInclude,
         });
 
-        return this.mapOrderWithPresentationData(updatedOrder);
+        const mapped = this.mapOrderWithPresentationData(updatedOrder);
+        return this.attachPickingResponsibilityData(mapped);
     }
 
     /**
@@ -1607,6 +2935,12 @@ export class OrderService {
         const order = await this.getOrderById(orderId);
         const pickingSession = order?.pickingSession || null;
         const sessionItems = pickingSession?.items || [];
+        const [contributionRows, unpickRequestRows] = await Promise.all([
+            this.listPickingItemContributionRows(orderId),
+            this.listPickingUnpickRequestRows(orderId),
+        ]);
+        const contributionsByItemId = this.buildPickingItemContributionMap(contributionRows);
+        const pendingUnpickRequestsByItemId = this.buildPendingUnpickRequestMap(unpickRequestRows);
 
         const items = (order?.items || [])
             .map((item: any) => {
@@ -1630,6 +2964,8 @@ export class OrderService {
                     status: itemStatus,
                     variant: item.variant,
                     responsibleUser: pickingSession?.assignedUser || null,
+                    contributions: contributionsByItemId.get(Number(sessionItem?.id || 0)) || [],
+                    pendingUnpickRequests: pendingUnpickRequestsByItemId.get(Number(sessionItem?.id || 0)) || [],
                     updatedAt: sessionItem?.createdAt || pickingSession?.updatedAt || order.updatedAt,
                 };
             })
@@ -1643,6 +2979,12 @@ export class OrderService {
             orderId: order.id,
             orderCode: order.code,
             orderStatus: order.status,
+            pickingResponsibility: order.pickingResponsibility || {
+                enabled: false,
+                primaryResponsible: null,
+                sharedResponsibles: [],
+                pendingRequests: [],
+            },
             pickingSession: pickingSession
                 ? {
                     id: pickingSession.id,
@@ -1675,20 +3017,45 @@ export class OrderService {
             throw CustomError.badRequest('La orden no tiene reservas activas para iniciar picking');
         }
 
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        const actorUserId = this.resolvePreferredResponsibleUserId(responsibleUserId);
         const assignedUserId = this.resolvePreferredResponsibleUserId(order.pickerUserId, responsibleUserId);
+
+        if (pickingResponsibilityFlowEnabled) {
+            if (!actorUserId) {
+                throw CustomError.unauthorized('No se pudo identificar al usuario que inicia picking');
+            }
+
+            if (Number(order.pickerUserId || 0) > 0) {
+                const canOperate = await this.canUserOperatePicking(order.id, actorUserId, order.pickerUserId);
+                if (!canOperate) {
+                    throw CustomError.forbidden('No tienes responsabilidad asignada en este picking');
+                }
+            }
+        }
 
         const session = await prisma.pickingSession.upsert({
             where: { orderId: order.id },
             create: {
                 orderId: order.id,
                 status: 'IN_PROGRESS',
-                assignedUserId,
+                assignedUserId: pickingResponsibilityFlowEnabled
+                    ? this.resolvePreferredResponsibleUserId(order.pickerUserId, actorUserId)
+                    : assignedUserId,
             },
             update: {
                 status: 'IN_PROGRESS',
-                assignedUserId,
+                assignedUserId: pickingResponsibilityFlowEnabled
+                    ? this.resolvePreferredResponsibleUserId(order.pickerUserId, actorUserId)
+                    : assignedUserId,
             },
         });
+        const defaultContributionUserId = this.resolvePreferredResponsibleUserId(
+            order.pickerUserId,
+            session.assignedUserId,
+            actorUserId,
+            assignedUserId,
+        );
 
         for (const item of order.items) {
             const existingPickingItem = await prisma.pickingItem.findFirst({
@@ -1699,14 +3066,38 @@ export class OrderService {
             });
 
             if (existingPickingItem) {
-                await prisma.pickingItem.update({
+                const refreshedPickingItem = await prisma.pickingItem.update({
                     where: { id: existingPickingItem.id },
                     data: { quantity: item.quantity },
                 });
+
+                if (
+                    pickingResponsibilityFlowEnabled
+                    && Number(defaultContributionUserId || 0) > 0
+                    && Number(refreshedPickingItem.pickedQuantity || 0) > 0
+                ) {
+                    const totalContributionRows = await prisma.$queryRaw(
+                        Prisma.sql`
+                            SELECT COALESCE(SUM("quantity"), 0) AS "quantity"
+                            FROM "PickingItemContribution"
+                            WHERE "orderId" = ${order.id}
+                              AND "pickingItemId" = ${refreshedPickingItem.id}
+                        `,
+                    ) as Array<{ quantity: number }>;
+                    const totalContributed = Math.max(0, Number(totalContributionRows?.[0]?.quantity || 0));
+                    if (totalContributed <= 0) {
+                        await this.updatePickingItemUserContribution(
+                            order.id,
+                            refreshedPickingItem.id,
+                            Number(defaultContributionUserId),
+                            Number(refreshedPickingItem.pickedQuantity || 0),
+                        );
+                    }
+                }
                 continue;
             }
 
-            await prisma.pickingItem.create({
+            const createdPickingItem = await prisma.pickingItem.create({
                 data: {
                     sessionId: session.id,
                     variantId: item.variantId,
@@ -1714,13 +3105,28 @@ export class OrderService {
                     pickedQuantity: Number(item.picked || 0),
                 },
             });
+
+            if (
+                pickingResponsibilityFlowEnabled
+                && Number(defaultContributionUserId || 0) > 0
+                && Number(createdPickingItem.pickedQuantity || 0) > 0
+            ) {
+                await this.updatePickingItemUserContribution(
+                    order.id,
+                    createdPickingItem.id,
+                    Number(defaultContributionUserId),
+                    Number(createdPickingItem.pickedQuantity || 0),
+                );
+            }
         }
 
         await prisma.order.update({
             where: { id: orderId },
             data: {
                 status: OrderStatusEnum.PREPARING,
-                pickerUserId: assignedUserId,
+                pickerUserId: pickingResponsibilityFlowEnabled
+                    ? this.resolvePreferredResponsibleUserId(order.pickerUserId, actorUserId)
+                    : assignedUserId,
             },
         });
 
@@ -1734,6 +3140,9 @@ export class OrderService {
 
         if (!Number.isFinite(pickedQuantity) || pickedQuantity < 0) {
             throw CustomError.badRequest('La cantidad separada debe ser mayor o igual a 0');
+        }
+        if (!Number.isInteger(pickedQuantity)) {
+            throw CustomError.badRequest('La cantidad separada debe ser un numero entero');
         }
 
         const pickingItem = await prisma.pickingItem.findUnique({
@@ -1757,6 +3166,8 @@ export class OrderService {
         }
 
         const order = pickingItem.session.order;
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        const actorUserId = this.resolvePreferredResponsibleUserId(responsibleUserId);
         const validStatuses = [
             OrderStatusEnum.CONFIRMED,
             OrderStatusEnum.PREPARING,
@@ -1767,6 +3178,21 @@ export class OrderService {
             throw CustomError.badRequest('La orden no permite actualizar picking en su estado actual');
         }
 
+        if (pickingResponsibilityFlowEnabled) {
+            if (!actorUserId) {
+                throw CustomError.unauthorized('No se pudo identificar al usuario que actualiza picking');
+            }
+
+            const canOperate = await this.canUserOperatePicking(
+                order.id,
+                actorUserId,
+                order.pickerUserId ?? pickingItem.session.assignedUserId ?? null,
+            );
+            if (!canOperate) {
+                throw CustomError.forbidden('No tienes responsabilidad asignada para actualizar este picking');
+            }
+        }
+
         const orderItem = order.items.find((item: any) => Number(item.variantId) === Number(pickingItem.variantId));
         if (!orderItem) {
             throw CustomError.badRequest('La variante del item de picking no pertenece a la orden');
@@ -1775,29 +3201,78 @@ export class OrderService {
         const maxAllowed = this.resolveMaxPickableQuantity(order, pickingItem.variantId, Number(orderItem.quantity || 0));
         const currentPickedQuantity = Number(pickingItem.pickedQuantity || 0);
         const isReducingOverflow = currentPickedQuantity > maxAllowed && pickedQuantity < currentPickedQuantity;
+        const quantityDelta = pickedQuantity - currentPickedQuantity;
 
         if (pickedQuantity > maxAllowed && !isReducingOverflow) {
             throw CustomError.badRequest(`La cantidad separada no puede superar ${maxAllowed}`);
         }
 
-        await prisma.pickingItem.update({
-            where: { id: pickingItemId },
-            data: { pickedQuantity },
+        if (pickingResponsibilityFlowEnabled && quantityDelta < 0) {
+            const reductionQuantity = Math.abs(quantityDelta);
+            let ownContribution = await this.getPickingItemUserContribution(order.id, pickingItemId, Number(actorUserId || 0));
+
+            if (ownContribution < reductionQuantity && actorUserId) {
+                const totalContributionRows = await prisma.$queryRaw(
+                    Prisma.sql`
+                        SELECT COALESCE(SUM("quantity"), 0) AS "quantity"
+                        FROM "PickingItemContribution"
+                        WHERE "orderId" = ${order.id}
+                          AND "pickingItemId" = ${pickingItemId}
+                    `,
+                ) as Array<{ quantity: number }>;
+                const totalContribution = Math.max(0, Number(totalContributionRows?.[0]?.quantity || 0));
+
+                // Compatibilidad: si este item viene de datos antiguos sin trazabilidad, tomamos el estado actual
+                // como contribucion del actor para no bloquear la operacion.
+                if (totalContribution <= 0 && currentPickedQuantity > 0) {
+                    ownContribution = await this.updatePickingItemUserContribution(
+                        order.id,
+                        pickingItemId,
+                        Number(actorUserId),
+                        currentPickedQuantity,
+                    );
+                }
+            }
+
+            if (ownContribution < reductionQuantity) {
+                throw CustomError.forbidden(
+                    'Solo puedes restar unidades separadas por ti. Usa "Solicitar accion" para retirar unidades separadas por otro responsable',
+                );
+            }
+        }
+
+        await prisma.$transaction(async (tx) => {
+            await tx.pickingItem.update({
+                where: { id: pickingItemId },
+                data: { pickedQuantity },
+            });
+
+            await tx.orderItem.update({
+                where: { id: orderItem.id },
+                data: {
+                    picked: pickedQuantity,
+                    status: this.mapOrderItemStatusFromPicked(pickedQuantity, Number(orderItem.quantity || 0)),
+                },
+            });
+
+            if (pickingResponsibilityFlowEnabled && actorUserId && quantityDelta !== 0) {
+                await this.updatePickingItemUserContribution(
+                    order.id,
+                    pickingItemId,
+                    Number(actorUserId),
+                    quantityDelta,
+                    tx,
+                );
+            }
         });
 
-        await prisma.orderItem.update({
-            where: { id: orderItem.id },
-            data: {
-                picked: pickedQuantity,
-                status: this.mapOrderItemStatusFromPicked(pickedQuantity, Number(orderItem.quantity || 0)),
-            },
-        });
-
-        const nextPickerUserId = this.resolvePreferredResponsibleUserId(
-            order.pickerUserId,
-            pickingItem.session.assignedUserId,
-            responsibleUserId,
-        );
+        const nextPickerUserId = pickingResponsibilityFlowEnabled
+            ? this.resolvePreferredResponsibleUserId(order.pickerUserId, pickingItem.session.assignedUserId, actorUserId)
+            : this.resolvePreferredResponsibleUserId(
+                order.pickerUserId,
+                pickingItem.session.assignedUserId,
+                responsibleUserId,
+            );
 
         const currentSessionAssignedUserId = pickingItem.session.assignedUserId ?? null;
         const currentOrderPickerUserId = order.pickerUserId ?? null;
@@ -1836,10 +3311,27 @@ export class OrderService {
             select: { pickerUserId: true },
         });
 
+        const pickingResponsibilityFlowEnabled = await this.isPickingResponsibilityFlowEnabled();
+        const actorUserId = this.resolvePreferredResponsibleUserId(responsibleUserId);
+        if (pickingResponsibilityFlowEnabled) {
+            if (!actorUserId) {
+                throw CustomError.unauthorized('No se pudo identificar al usuario que finaliza picking');
+            }
+
+            const canOperate = await this.canUserOperatePicking(
+                orderId,
+                actorUserId,
+                currentOrder?.pickerUserId ?? picking.pickingSession.assignedUser?.id ?? null,
+            );
+            if (!canOperate) {
+                throw CustomError.forbidden('No tienes responsabilidad asignada para finalizar este picking');
+            }
+        }
+
         const assignedUserId = this.resolvePreferredResponsibleUserId(
             picking.pickingSession.assignedUser?.id,
             currentOrder?.pickerUserId,
-            responsibleUserId,
+            pickingResponsibilityFlowEnabled ? actorUserId : responsibleUserId,
         );
 
         await prisma.pickingSession.update({
@@ -1862,7 +3354,7 @@ export class OrderService {
     }
 
     async updateOrderPicking(orderId: number, dto: UpdateOrderPickingDto, responsibleUserId?: number) {
-        await this.startOrderPicking(orderId);
+        await this.startOrderPicking(orderId, responsibleUserId);
         const currentPicking = await this.getOrderPicking(orderId);
         const pickingItemsByVariant = new Map<number, any>(
             (currentPicking.items || [])

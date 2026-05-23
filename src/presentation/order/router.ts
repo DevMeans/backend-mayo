@@ -38,6 +38,21 @@ export class orderRoute {
         // Actualizar item de picking
         router.patch('/picking/items/:itemId', controller.updatePickingItem);
 
+        // Solicitar accion para unpick en item de picking
+        router.post('/:id/picking/items/:itemId/unpick-request', controller.requestPickingUnpickAction);
+
+        // Resolver solicitud de accion de unpick
+        router.patch('/:id/picking/unpick-requests/:requestId', controller.resolvePickingUnpickAction);
+
+        // Solicitar responsabilidad en picking
+        router.post('/:id/picking/responsibility/request', controller.requestPickingResponsibility);
+
+        // Delegar responsabilidad en picking
+        router.patch('/:id/picking/responsibility/delegate', controller.delegatePickingResponsibility);
+
+        // Resolver solicitud de responsabilidad en picking
+        router.patch('/:id/picking/responsibility/requests/:requestId', controller.resolvePickingResponsibilityRequest);
+
         // Obtener pedido por ID
         router.get('/:id', controller.getOrderById);
 
