@@ -30,7 +30,9 @@ export class Server {
     async start() {
 
         this.app.use(express.json({ limit: '15mb' }));
-        this.app.use(cors());   
+        this.app.use(cors({
+            exposedHeaders: ['x-access-token'],
+        }));
         this.app.use(express.urlencoded({ extended: true, limit: '15mb' }));
         this.app.use(AuditLogMiddleware.capture(new AuditLogService()));
 

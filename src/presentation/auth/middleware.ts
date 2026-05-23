@@ -38,6 +38,18 @@ export class AuthMiddleware {
                 req.user.permissions = decoded.permissions;
             }
 
+            const refreshedToken = jwt.sign(
+                {
+                    id: decoded.id,
+                    email: decoded.email,
+                    role: decoded.role,
+                    ...(Array.isArray(decoded.permissions) ? { permissions: decoded.permissions } : {}),
+                },
+                envs.JWT_SECRET,
+                { expiresIn: '1h' },
+            );
+            res.setHeader('x-access-token', refreshedToken);
+
             next();
         } catch (error: unknown) {
             if (error instanceof jwt.TokenExpiredError) {
