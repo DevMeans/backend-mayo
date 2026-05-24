@@ -38,7 +38,7 @@ export class Server {
             : path.join(__dirname, '..', this.publicPath);
 
         this.app.use(express.static(publicDir));
-        this.app.get('/health', (_req, res) => {
+        this.app.get('/ ', (_req, res) => {
             res.status(200).json({ status: 'ok' });
         });
         
