@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/app.ts",
-    "build": "rimraf ./dist && tsc",
+    "build": "npm run db:generate && rimraf ./dist && tsc",
     "start": "npm run build && node dist/app.js",
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
