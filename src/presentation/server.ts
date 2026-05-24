@@ -1,11 +1,8 @@
 import express, { Router } from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { AuditLogMiddleware } from './audit-log/middleware';
 import { AuditLogService } from './services/audit-log.service';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface Options {
     port: number;

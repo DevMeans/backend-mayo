@@ -7,7 +7,7 @@
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "es2022",
+    "module": "Node16",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "target": "es2023",
@@ -42,7 +42,7 @@
     "verbatimModuleSyntax": false,
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
-    "moduleResolution": "bundler",
+    "moduleResolution": "Node16",
     "skipLibCheck": true,
   }
   ,
