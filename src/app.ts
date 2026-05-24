@@ -7,6 +7,7 @@ import { ensureMarketplaceAuthSchema } from "./data/marketplace-auth-bootstrap";
 import { ensureAuditLogSchema } from "./data/audit-log-bootstrap";
 import { ensureUserActivitySchema } from "./data/user-activity-bootstrap";
 import { ensurePickingResponsibilitySchema } from "./data/picking-responsibility-bootstrap";
+import { envs } from "./config/envs";
 
 
 (async () => {
@@ -67,7 +68,7 @@ async function main() {
     }
 
     const server = new Server({
-        port: 3000,
+        port: envs.PORT,
         routes: AppRouter.router
     });
     await server.start();

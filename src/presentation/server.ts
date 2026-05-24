@@ -41,6 +41,9 @@ export class Server {
             : path.join(__dirname, '..', this.publicPath);
 
         this.app.use(express.static(publicDir));
+        this.app.get('/health', (_req, res) => {
+            res.status(200).json({ status: 'ok' });
+        });
         
         this.app.use(this.routes);
 
@@ -48,7 +51,7 @@ export class Server {
             const indexPath = path.join(publicDir, 'index.html');
             res.sendFile(indexPath);
         });
-        this.serverListener = this.app.listen(this.port, () => console.log(`Example app listening on port ${this.port}!`));
+        this.serverListener = this.app.listen(this.port, '0.0.0.0', () => console.log(`Example app listening on port ${this.port}!`));
     }
     public close() {
         this.serverListener.close();
