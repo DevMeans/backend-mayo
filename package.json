@@ -5,13 +5,15 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/app.ts",
-    "build": "npm run db:generate && rimraf ./dist && tsc",
+    "build": "npm run db:generate && rimraf ./dist && tsc && node scripts/copy-public.mjs",
     "start": "npm run db:migrate:deploy && node dist/app.js",
     "start:rebuild": "npm run build && npm run start",
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "seed": "tsx src/data/seed.ts",
+    "seed:prod": "node dist/data/seed.js",
+    "seed:build": "npm run build && npm run seed:prod",
     "db:clean:keep-users": "tsx src/data/clean-db-keep-users.ts"
   },
   "keywords": [],

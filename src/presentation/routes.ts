@@ -16,12 +16,14 @@ import { paymentMethodRoute } from "./payment-method/router";
 import { systemConfigRoute } from "./system-config/router";
 import { auditLogRoute } from "./audit-log/router";
 import { userActivityRoute } from "./user-activity/router";
+import { SeedRoute } from "./seed/router";
 
 export class AppRouter{
 
     static get router():Router{
         const router = Router();
         router.use('/api/auth', AuthRouter.router);
+        router.use('/api/seed', SeedRoute.router);
         router.use('/api/users', UserRouter.router);
         router.use('/api/roles', RoleRouter.router);
         router.use('/api/public', publicRoute.router);

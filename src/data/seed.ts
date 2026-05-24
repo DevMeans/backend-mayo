@@ -2,7 +2,12 @@ import { prisma } from './prisma';
 import bcrypt from 'bcryptjs';
 import { PermissionService } from '../presentation/services/permission.service';
 
-async function main() {
+export type SeedRunSummary = {
+    roles: string[];
+    users: string[];
+};
+
+export async function runSeed(): Promise<SeedRunSummary> {
     const roleDefinitions: Array<{ name: string; description: string }> = [
         { name: 'ADMIN', description: 'Acceso total al sistema' },
         { name: 'MANAGER', description: 'Gestion operativa del negocio' },
@@ -83,14 +88,24 @@ async function main() {
         }
     });
 
-    console.log('Seed completed');
+    return {
+        roles: Array.from(roleByName.keys()),
+        users: ['admin@example.com', 'user@example.com'],
+    };
 }
 
-main()
-    .catch((e) => {
-        console.error(e);
-        process.exit(1);
-    })
-    .finally(async () => {
-        await prisma.$disconnect();
-    });
+async function main() {
+    const summary = await runSeed();
+    console.log('Seed completed', summary);
+}
+
+if (require.main === module) {
+    main()
+        .catch((e) => {
+            console.error(e);
+            process.exit(1);
+        })
+        .finally(async () => {
+            await prisma.$disconnect();
+        });
+}
