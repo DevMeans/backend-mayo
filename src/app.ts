@@ -7,64 +7,78 @@ import { ensureMarketplaceAuthSchema } from "./data/marketplace-auth-bootstrap";
 import { ensureAuditLogSchema } from "./data/audit-log-bootstrap";
 import { ensureUserActivitySchema } from "./data/user-activity-bootstrap";
 import { ensurePickingResponsibilitySchema } from "./data/picking-responsibility-bootstrap";
+import { prisma } from "./data/prisma";
 import { envs } from "./config/envs";
 
+const RAILWAY_INTERNAL_HOST_SUFFIX = '.railway.internal';
+const BOOTSTRAP_STEPS: Array<{ name: string; run: () => Promise<void> }> = [
+    { name: 'RBAC', run: ensureRbacSchema },
+    { name: 'Payment method', run: ensurePaymentMethodSchema },
+    { name: 'System config', run: ensureSystemConfigSchema },
+    { name: 'Marketplace auth', run: ensureMarketplaceAuthSchema },
+    { name: 'Audit log', run: ensureAuditLogSchema },
+    { name: 'User activity', run: ensureUserActivitySchema },
+    { name: 'Picking responsibility', run: ensurePickingResponsibilitySchema },
+];
 
 (async () => {
-
-    main();
+    await main();
 })();
+
+function getDatabaseHost(connectionString: string): string | null {
+    try {
+        return new URL(connectionString).hostname;
+    } catch {
+        return null;
+    }
+}
+
+function isRailwayInternalHost(hostname: string | null): boolean {
+    return Boolean(hostname?.endsWith(RAILWAY_INTERNAL_HOST_SUFFIX));
+}
+
+function isRunningOnRailway(): boolean {
+    return Boolean(process.env.RAILWAY_PROJECT_ID);
+}
+
+async function ensureDatabaseReachability(): Promise<boolean> {
+    try {
+        await prisma.$queryRawUnsafe('SELECT 1');
+        return true;
+    } catch (error) {
+        const databaseHost = getDatabaseHost(envs.DATABASE_URL);
+
+        console.error('Database bootstrap warning: unable to connect to PostgreSQL. Schema bootstrap steps were skipped.');
+        if (databaseHost) {
+            console.error(`Configured database host: ${databaseHost}`);
+        }
+
+        if (isRailwayInternalHost(databaseHost) && !isRunningOnRailway()) {
+            console.error('Detected Railway private hostname outside Railway runtime. Use DATABASE_PUBLIC_URL for external access.');
+        }
+
+        console.error(error);
+        return false;
+    }
+}
+
+async function runSchemaBootstraps(): Promise<void> {
+    for (const step of BOOTSTRAP_STEPS) {
+        try {
+            await step.run();
+            console.log(`${step.name} schema validated`);
+        } catch (error) {
+            console.error(`${step.name} bootstrap warning:`, error);
+        }
+    }
+}
 
 async function main() {
     console.log('Hello world');
 
-    try {
-        await ensureRbacSchema();
-        console.log('RBAC schema validated');
-    } catch (error) {
-        console.error('RBAC bootstrap warning:', error);
-    }
-
-    try {
-        await ensurePaymentMethodSchema();
-        console.log('Payment method schema validated');
-    } catch (error) {
-        console.error('Payment method bootstrap warning:', error);
-    }
-
-    try {
-        await ensureSystemConfigSchema();
-        console.log('System config schema validated');
-    } catch (error) {
-        console.error('System config bootstrap warning:', error);
-    }
-
-    try {
-        await ensureMarketplaceAuthSchema();
-        console.log('Marketplace auth schema validated');
-    } catch (error) {
-        console.error('Marketplace auth bootstrap warning:', error);
-    }
-
-    try {
-        await ensureAuditLogSchema();
-        console.log('Audit log schema validated');
-    } catch (error) {
-        console.error('Audit log bootstrap warning:', error);
-    }
-
-    try {
-        await ensureUserActivitySchema();
-        console.log('User activity schema validated');
-    } catch (error) {
-        console.error('User activity bootstrap warning:', error);
-    }
-
-    try {
-        await ensurePickingResponsibilitySchema();
-        console.log('Picking responsibility schema validated');
-    } catch (error) {
-        console.error('Picking responsibility bootstrap warning:', error);
+    const databaseReachable = await ensureDatabaseReachability();
+    if (databaseReachable) {
+        await runSchemaBootstraps();
     }
 
     const server = new Server({
