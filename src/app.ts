@@ -11,6 +11,7 @@ import { prisma } from "./data/prisma";
 import { envs } from "./config/envs";
 
 const RAILWAY_INTERNAL_HOST_SUFFIX = '.railway.internal';
+const REQUIRED_BASE_TABLES = ['Role', 'User', 'Order', 'OrderItem', 'PickingItem'];
 const BOOTSTRAP_STEPS: Array<{ name: string; run: () => Promise<void> }> = [
     { name: 'RBAC', run: ensureRbacSchema },
     { name: 'Payment method', run: ensurePaymentMethodSchema },
@@ -62,6 +63,30 @@ async function ensureDatabaseReachability(): Promise<boolean> {
     }
 }
 
+async function ensureBaseSchemaReady(): Promise<boolean> {
+    type TableRow = { table_name: string };
+
+    const existingTables = await prisma.$queryRawUnsafe<TableRow[]>(
+        `SELECT table_name
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name = ANY($1::text[])`,
+        REQUIRED_BASE_TABLES,
+    );
+
+    const existingTableSet = new Set(existingTables.map((row) => row.table_name));
+    const missingTables = REQUIRED_BASE_TABLES.filter((tableName) => !existingTableSet.has(tableName));
+
+    if (missingTables.length > 0) {
+        console.error('Database schema bootstrap warning: base Prisma tables are missing.');
+        console.error(`Missing tables: ${missingTables.join(', ')}`);
+        console.error('Run `npm run db:migrate:deploy` before starting the app container.');
+        return false;
+    }
+
+    return true;
+}
+
 async function runSchemaBootstraps(): Promise<void> {
     for (const step of BOOTSTRAP_STEPS) {
         try {
@@ -77,9 +102,16 @@ async function main() {
     console.log('Hello world');
 
     const databaseReachable = await ensureDatabaseReachability();
-    if (databaseReachable) {
-        await runSchemaBootstraps();
+    if (!databaseReachable) {
+        throw new Error('Startup aborted: database is not reachable.');
     }
+
+    const baseSchemaReady = await ensureBaseSchemaReady();
+    if (!baseSchemaReady) {
+        throw new Error('Startup aborted: base Prisma schema is missing. Run migrations first.');
+    }
+
+    await runSchemaBootstraps();
 
     const server = new Server({
         port: envs.PORT,
